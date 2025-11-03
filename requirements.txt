@@ -1,0 +1,9 @@
+dash>=2.0
+Flask>=2.0
+msal>=1.20
+SQLAlchemy>=1.4
+pymysql
+PyJWT
+werkzeug
+pandas
+dash-table
