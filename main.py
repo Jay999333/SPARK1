@@ -659,6 +659,9 @@ def dev_init_db():
 # -----------------------
 # Run
 # -----------------------
+app = dash.Dash(__name__)
+server = app.server  # This exposes the Flask server for Gunicorn
+
 if __name__ == "__main__":
     # Safety: ensure redirect uri uses the right FRONTEND_BASE
     print("Starting Dash app. FRONTEND_BASE:", FRONTEND_BASE)
