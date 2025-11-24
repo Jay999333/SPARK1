@@ -37,6 +37,7 @@ import dash
 from dash import html, dcc, Dash, Input, Output, State, ctx, dash_table
 import pandas as pd
 
+DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "false").lower() == "true"
 
 # load required secrets (fail fast instead of using insecure defaults)
 # load required secrets (with defaults for testing)
@@ -213,7 +214,14 @@ def logout():
 def require_login(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if "user" not in session:
+        if DISABLE_AUTH:
+            # Mock user for dev/testing
+            session["user"] = {
+                "oid": "dev-user",
+                "email": "dev@example.com",
+                "name": "Dev User"
+            }
+        elif "user" not in session:
             return redirect("/login")
         return f(*args, **kwargs)
     return decorated
@@ -221,6 +229,26 @@ def require_login(f):
 def require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if DISABLE_AUTH:
+            # Auto-create dev admin user
+        if "user" not in session:
+            session["user"] = {
+                "oid": "dev-admin",
+                "email": "admin@example.com",
+                "name": "Dev Admin"
+            }
+        usr = session.get("user")
+        db_user = User.query.filter_by(oid=usr.get("oid")).first()
+        if not db_user:
+            db_user = User(
+                oid=usr.get("oid"),
+                email=usr.get("email"),
+                name=usr.get("name"),
+                is_admin=True
+            )
+            db.session.add(db_user)
+            db.session.commit()
+    else:
         usr = session.get("user")
         if not usr:
             return redirect("/login")
@@ -243,6 +271,28 @@ def verify_device_api_key(device_id, api_key_plain):
         return False
     # Compare hashed key
     return check_password_hash(device.api_key_hash, api_key_plain)
+
+@server.route("/dev_login")
+def dev_login():
+    if not DISABLE_AUTH:
+        return "Dev mode disabled", 403
+    session["user"] = {
+        "oid": "dev-admin",
+        "email": "admin@example.com",
+        "name": "Dev Admin"
+    }
+    # Create admin user if not exists
+    db_user = User.query.filter_by(oid="dev-admin").first()
+    if not db_user:
+        db_user = User(
+            oid="dev-admin",
+            email="admin@example.com",
+            name="Dev Admin",
+            is_admin=True
+        )
+        db.session.add(db_user)
+        db.session.commit()
+    return redirect("/")
 
 @server.route("/api/pi/validate", methods=["POST"])
 def pi_validate():
