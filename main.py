@@ -126,6 +126,13 @@ class AccessLog(db.Model):
     result = db.Column(db.String(64))  # e.g., "granted", "denied", "invalid_card"
     reason = db.Column(db.Text)
 
+class ConnectionLog(db.Model):
+    __tablename__ = "connection_logs"
+    id = db.Column(db.Integer, primary_key=True)
+    numTag = db.Column(db.String(128))
+    tagEncre = db.Column(db.String(20))
+    last_connection = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
 class PiDevice(db.Model):
     __tablename__ = "pi_devices"
     id = db.Column(db.Integer, primary_key=True)
@@ -495,6 +502,29 @@ def admin_logs():
     logs = query.order_by(AccessLog.timestamp.desc()).limit(limit).all()
     return jsonify([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
 
+#----------------------------------------------------------------
+#----------------------------------------------------------------
+#----------------------------------------------------------------
+#----------------------------------------------------------------
+#----------------------------------------------------------------
+#----------------------------------------------------------------
+@server.route("/api/admin/logs_connection", methods=["GET"])
+@require_admin
+def admin_logs_connection():
+    # simple filters
+    cards = ConnectionLog.query.all()
+    return jsonify([{"numTag": c.numTag, "tagEncre": c.tagEncre, "last_connection": c.last_connection} for c in cards])
+
+    
+    #numTag = request.args.get("numTag")
+    #limit = min(int(request.args.get("limit", "200")), 2000)
+    #query = ConnectionLog.query
+    #if numTag:
+    #    query = query.filter_by(numTag=numTag)
+    #logs = query.order_by(ConnectionLog.timestamp.desc()).limit(limit).all()
+    #return jsonify([{"numTag": l.numTag, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
+
+
 # -----------------------
 # Dash App (UI)
 # -----------------------
@@ -513,6 +543,7 @@ app.layout = html.Div([
         dcc.Tab(label="Cards", value="cards"),
         dcc.Tab(label="Access Rules", value="rules"),
         dcc.Tab(label="Logs", value="logs"),
+        dcc.Tab(label="Connection Logs", value="logs_connection"),
         dcc.Tab(label="Pi Devices (Admin)", value="pi")
     ], value="cards"),
     html.Div(id="tab-content")
@@ -588,6 +619,19 @@ def render_tab(tab):
         df = pd.DataFrame([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
         return html.Div([
             html.H3("Access Logs"),
+            dash_table.DataTable(
+                id="logs-table",
+                columns=[{"name": c, "id": c} for c in df.columns],
+                data=df.to_dict("records"),
+                page_size=20
+            ),
+            html.Button("Refresh", id="refresh-logs")
+        ])
+    if tab == "logs_connection":
+        logs = ConnectionLog.query.order_by(ConnectionLog.timestamp.desc()).limit(200).all()
+        df = pd.DataFrame([{"numTag": l.numTag, "last_connection": l.last_connection.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
+        return html.Div([
+            html.H3("Connection Logs"),
             dash_table.DataTable(
                 id="logs-table",
                 columns=[{"name": c, "id": c} for c in df.columns],
