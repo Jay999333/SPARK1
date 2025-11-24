@@ -511,9 +511,14 @@ def admin_logs():
 @server.route("/api/admin/logs_connection", methods=["GET"])
 @require_admin
 def admin_logs_connection():
-    # simple filters
-    cards = ConnectionLog.query.all()
-    return jsonify([{"numTag": c.numTag, "tagEncre": c.tagEncre, "last_connection": c.last_connection} for c in cards])
+    # Get all connection logs
+    logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
+    
+    return jsonify([{
+        "numTag": log.numTag, 
+        "tagEncre": log.tagEncre, 
+        "last_connection": log.last_connection.isoformat()
+    } for log in logs])
 
     
     #numTag = request.args.get("numTag")
@@ -628,17 +633,22 @@ def render_tab(tab):
             html.Button("Refresh", id="refresh-logs")
         ])
     if tab == "logs_connection":
-        logs = ConnectionLog.query.order_by(ConnectionLog.timestamp.desc()).limit(200).all()
-        df = pd.DataFrame([{"numTag": l.numTag, "last_connection": l.last_connection.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
+        logs = ConnectionLog.query.order_by(onectionLog.last_connection.desc()).all()
+        df = pd.DataFrame([{
+            "numTag": l.numTag, 
+            "tagEncre": l.tagEncre, 
+            "last_connection": l.last_connection.isoformat()
+        } for l in logs])
+
         return html.Div([
             html.H3("Connection Logs"),
             dash_table.DataTable(
-                id="logs-table",
+                id="connection-table",
                 columns=[{"name": c, "id": c} for c in df.columns],
                 data=df.to_dict("records"),
                 page_size=20
             ),
-            html.Button("Refresh", id="refresh-logs")
+            html.Button("Refresh", id="refresh-connection-logs")
         ])
     if tab == "pi":
         devices = PiDevice.query.all()
