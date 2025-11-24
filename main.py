@@ -230,25 +230,99 @@ def require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if DISABLE_AUTH:
-            # Auto-create dev admin user
-        if "user" not in session:
-            session["user"] = {
-                "oid": "dev-admin",
-                "email": "admin@example.com",
-                "name": "Dev Admin"
-            }
+            # In dev mode: ensure a dev-admin session and DB record, then allow
+            session.setdefault("user", {"oid": "dev-admin", "email": "admin@example.com", "name": "Dev Admin"})
+            usr = session.get("user")
+            db_user = User.query.filter_by(oid=usr.get("oid")).first()
+            if not db_user:
+                db_user = User(
+                    oid=usr.get("oid"),
+                    email=usr.get("email"),
+                    name=usr.get("name"),
+                    is_admin=True
+                )
+                db.session.add(db_user)
+                db.session.commit()
+            return f(*args, **kwargs)
+
+        # Normal (auth enabled) path: require signed in admin user
         usr = session.get("user")
+        if not usr:
+            return redirect("/login")
         db_user = User.query.filter_by(oid=usr.get("oid")).first()
-        if not db_user:
-            db_user = User(
-                oid=usr.get("oid"),
-                email=usr.get("email"),
-                name=usr.get("name"),
-                is_admin=True
-            )
-            db.session.add(db_user)
-            db.session.commit()
-    else:
+        if not db_user or not db_user.is_admin:
+            return "Forbidden: Admins only", 403
+        return f(*args, **kwargs)
+    return decorated
+
+@server.route("/dev_login")
+def dev_login():
+    if not DISABLE_AUTH:
+        return "Dev mode disabled", 403
+    session["user"] = {
+        "oid": "dev-admin",
+        "email": "admin@example.com",
+        "name": "Dev Admin"
+    }
+    # Create admin user if not exists
+    db_user = User.query.filter_by(oid="dev-admin").first()
+    if not db_user:
+        db_user = User(
+            oid="dev-admin",
+            email="admin@example.com",
+            name="Dev Admin",
+            is_admin=True
+        )
+        db.session.add(db_user)
+        db.session.commit()
+    return redirect("/")
+
+@server.route("/logout")
+def logout():
+    session.clear()
+    return redirect(
+        AUTHORITY + "/oauth2/v2.0/logout" +
+        "?post_logout_redirect_uri=" + FRONTEND_BASE
+    )
+
+# -----------------------
+# Helper: require_login decorator
+# -----------------------
+def require_login(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if DISABLE_AUTH:
+            # Mock user for dev/testing
+            session["user"] = {
+                "oid": "dev-user",
+                "email": "dev@example.com",
+                "name": "Dev User"
+            }
+        elif "user" not in session:
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated
+
+def require_admin(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if DISABLE_AUTH:
+            # In dev mode: ensure a dev-admin session and DB record, then allow
+            session.setdefault("user", {"oid": "dev-admin", "email": "admin@example.com", "name": "Dev Admin"})
+            usr = session.get("user")
+            db_user = User.query.filter_by(oid=usr.get("oid")).first()
+            if not db_user:
+                db_user = User(
+                    oid=usr.get("oid"),
+                    email=usr.get("email"),
+                    name=usr.get("name"),
+                    is_admin=True
+                )
+                db.session.add(db_user)
+                db.session.commit()
+            return f(*args, **kwargs)
+
+        # Normal (auth enabled) path: require signed in admin user
         usr = session.get("user")
         if not usr:
             return redirect("/login")
