@@ -7,4 +7,3 @@ pandas
 pymysql
 cryptography
 werkzeug
-gunicorn
