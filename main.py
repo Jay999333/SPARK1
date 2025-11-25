@@ -534,6 +534,8 @@ def admin_logs_connection():
 # Dash App (UI)
 # -----------------------
 app = Dash(__name__, server=server, url_base_pathname="/", suppress_callback_exceptions=True)
+app.title = 'Spark door access admin'
+app._faicon = ("assets/sparkmicro_rgb")
 
 # Simple top layout: header with login/logout, sections to manage cards, rules, logs
 app.layout = html.Div([
@@ -633,23 +635,26 @@ def render_tab(tab):
             html.Button("Refresh", id="refresh-logs")
         ])
     if tab == "logs_connection":
-        logs = ConnectionLog.query.order_by(onectionLog.last_connection.desc()).all()
-        df = pd.DataFrame([{
-            "numTag": l.numTag, 
-            "tagEncre": l.tagEncre, 
-            "last_connection": l.last_connection.isoformat()
-        } for l in logs])
+        
+        logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
+        data = [{
+            "numTag": l.numTag,
+            "tagEncre": l.tagEncre,
+            "last_connection": l.last_connection.isoformat() if l.last_connection else ""
+        } for l in logs]
+        df = pd.DataFrame(data, columns=["numTag", "tagEncre", "last_connection"])
 
         return html.Div([
-            html.H3("Connection Logs"),
-            dash_table.DataTable(
-                id="connection-table",
-                columns=[{"name": c, "id": c} for c in df.columns],
-                data=df.to_dict("records"),
-                page_size=20
-            ),
-            html.Button("Refresh", id="refresh-connection-logs")
-        ])
+             html.H3("Connection Logs"),
+             dash_table.DataTable(
+                 id="connection-table",
+-                columns=[{"name": c, "id": c} for c in df.columns],
++                columns=[{"name": c, "id": c} for c in df.columns],
+                 data=df.to_dict("records"),
+                 page_size=20
+             ),
+             html.Button("Refresh", id="refresh-connection-logs")
+         ])
     if tab == "pi":
         devices = PiDevice.query.all()
         df = pd.DataFrame([{"device_id": d.device_id, "description": d.description, "enabled": d.enabled} for d in devices])
