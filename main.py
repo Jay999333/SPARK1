@@ -648,8 +648,7 @@ def render_tab(tab):
              html.H3("Connection Logs"),
              dash_table.DataTable(
                  id="connection-table",
--                columns=[{"name": c, "id": c} for c in df.columns],
-+                columns=[{"name": c, "id": c} for c in df.columns],
+                 columns=[{"name": c, "id": c} for c in df.columns],
                  data=df.to_dict("records"),
                  page_size=20
              ),
