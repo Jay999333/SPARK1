@@ -101,14 +101,14 @@ class User(db.Model):
     oid = db.Column(db.String(128), unique=True)  # Azure object id
     email = db.Column(db.String(256), unique=True)
     name = db.Column(db.String(256))
-    is_admin = db.Column(db.Boolean, default=False)
+    is_admin = db.Column(db.BOOLEAN, default=False)
 
 class Card(db.Model):
     __tablename__ = "cards"
     id = db.Column(db.Integer, primary_key=True)
     card_id = db.Column(db.String(128), unique=True, nullable=False)  # e.g. RFID tag
     owner = db.Column(db.String(256))
-    active = db.Column(db.Boolean, default=True)
+    active = db.Column(db.BOOLEAN, default=True)
 
 class AccessRule(db.Model):
     __tablename__ = "access_rules"
@@ -140,7 +140,7 @@ class PiDevice(db.Model):
     device_id = db.Column(db.String(128), unique=True)
     api_key_hash = db.Column(db.String(256))  # hashed API key for device
     description = db.Column(db.String(256))
-    enabled = db.Column(db.Boolean, default=True)
+    enabled = db.Column(db.BOOLEAN, default=True)
 
 #DB Encre
 class EncreDevice(db.Model):
@@ -149,7 +149,7 @@ class EncreDevice(db.Model):
     encre_id = db.Column(db.String(128), unique=True, nullable=False)
     encre_name = db.Column(db.String(256), unique=True, nullable=False)
     description = db.Column(db.Text)
-    active = db.Column(db.Boolean, default=True)
+    active = db.Column(db.BOOLEAN, default=True)
 
 # -----------------------
 # Utility: create MSAL app
@@ -460,12 +460,12 @@ def admin_cards():
         c = Card(card_id=card_id, owner=owner)
         db.session.add(c)
         
-        # Create default deny rule (no access)
+        # Create default deny rule (no access) with encre_id set to None
         default_rule = AccessRule(
             card_id=card_id,
+            encre_id=None,
             access_from=None,
             access_to=None,
-            door_id=None,
             attributes=json.dumps({"default": "no_access"})
         )
         db.session.add(default_rule)
