@@ -114,9 +114,10 @@ class AccessRule(db.Model):
     __tablename__ = "access_rules"
     id = db.Column(db.Integer, primary_key=True)
     card_id = db.Column(db.String(128), db.ForeignKey("cards.card_id"), nullable=False)
-    access_from = db.Column(db.Time, nullable=True)  # daily start time
-    access_to = db.Column(db.Time, nullable=True)    # daily end time
-    attributes = db.Column(db.Text)  # JSON string for attributes (e.g., doors, roles)
+    encre_id = db.Column(db.String(128), db.ForeignKey("encre_devices.encre_id"), nullable=True)
+    access_from = db.Column(db.Time, nullable=True)
+    access_to = db.Column(db.Time, nullable=True)
+    attributes = db.Column(db.Text)
 
 class AccessLog(db.Model):
     __tablename__ = "access_logs"
@@ -140,6 +141,15 @@ class PiDevice(db.Model):
     api_key_hash = db.Column(db.String(256))  # hashed API key for device
     description = db.Column(db.String(256))
     enabled = db.Column(db.Boolean, default=True)
+
+#DB Encre
+class EncreDevice(db.Model):
+    __tablename__ = "encre_devices"
+    id = db.Column(db.Integer, primary_key=True)
+    encre_id = db.Column(db.String(128), unique=True, nullable=False)
+    encre_name = db.Column(db.String(256), unique=True, nullable=False)
+    description = db.Column(db.Text)
+    active = db.Column(db.Boolean, default=True)
 
 # -----------------------
 # Utility: create MSAL app
@@ -436,6 +446,7 @@ def admin_cards():
     if request.method == "GET":
         cards = Card.query.all()
         return jsonify([{"card_id": c.card_id, "owner": c.owner, "active": c.active} for c in cards])
+    
     if request.method == "POST":
         data = request.json or {}
         card_id = data.get("card_id")
@@ -444,42 +455,87 @@ def admin_cards():
             return jsonify({"error": "card_id required"}), 400
         if Card.query.filter_by(card_id=card_id).first():
             return jsonify({"error": "card_exists"}), 400
+        
+        # Create card
         c = Card(card_id=card_id, owner=owner)
         db.session.add(c)
+        
+        # Create default deny rule (no access)
+        default_rule = AccessRule(
+            card_id=card_id,
+            access_from=None,
+            access_to=None,
+            door_id=None,
+            attributes=json.dumps({"default": "no_access"})
+        )
+        db.session.add(default_rule)
         db.session.commit()
         return jsonify({"ok": True})
+    
     if request.method == "DELETE":
         data = request.json or {}
         card_id = data.get("card_id")
         c = Card.query.filter_by(card_id=card_id).first()
         if not c:
             return jsonify({"error": "not_found"}), 404
+        
+        # Delete associated rules
+        AccessRule.query.filter_by(card_id=card_id).delete()
         db.session.delete(c)
         db.session.commit()
         return jsonify({"ok": True})
 
-@server.route("/api/admin/access_rule", methods=["POST", "DELETE"])
+@server.route("/api/admin/access_rule", methods=["POST", "PUT", "DELETE"])
 @require_admin
 def admin_access_rule():
     if request.method == "POST":
         data = request.json or {}
         card_id = data.get("card_id")
-        access_from = data.get("access_from")  # "HH:MM"
-        access_to = data.get("access_to")      # "HH:MM"
+        encre_id = data.get("encre_id")
+        access_from = data.get("access_from")
+        access_to = data.get("access_to")
         attributes = data.get("attributes", {})
+        
         if not card_id:
             return jsonify({"error": "card_id required"}), 400
-        # convert times
+        
         atime_from = None
         atime_to = None
         if access_from:
             atime_from = datetime.datetime.strptime(access_from, "%H:%M").time()
         if access_to:
             atime_to = datetime.datetime.strptime(access_to, "%H:%M").time()
-        ar = AccessRule(card_id=card_id, access_from=atime_from, access_to=atime_to, attributes=json.dumps(attributes))
+        
+        ar = AccessRule(
+            card_id=card_id,
+            encre_id=encre_id if encre_id else None,
+            access_from=atime_from,
+            access_to=atime_to,
+            attributes=json.dumps(attributes)
+        )
         db.session.add(ar)
         db.session.commit()
         return jsonify({"ok": True})
+    
+    if request.method == "PUT":
+        data = request.json or {}
+        rule_id = data.get("rule_id")
+        rule = AccessRule.query.filter_by(id=rule_id).first()
+        if not rule:
+            return jsonify({"error": "not_found"}), 404
+        
+        if "encre_id" in data:
+            rule.encre_id = data["encre_id"]
+        if "access_from" in data and data["access_from"]:
+            rule.access_from = datetime.datetime.strptime(data["access_from"], "%H:%M").time()
+        if "access_to" in data and data["access_to"]:
+            rule.access_to = datetime.datetime.strptime(data["access_to"], "%H:%M").time()
+        if "attributes" in data:
+            rule.attributes = json.dumps(data["attributes"])
+        
+        db.session.commit()
+        return jsonify({"ok": True})
+    
     if request.method == "DELETE":
         data = request.json or {}
         rule_id = data.get("rule_id")
@@ -520,14 +576,72 @@ def admin_logs_connection():
         "last_connection": log.last_connection.isoformat()
     } for log in logs])
 
+@server.route("/api/admin/encres", methods=["GET", "POST", "PUT", "DELETE"])
+@require_admin
+def admin_encres():
+    if request.method == "GET":
+        encres = EncreDevice.query.all()
+        return jsonify([{
+            "encre_id": d.encre_id, 
+            "encre_name": d.encre_name, 
+            "description": d.description,
+            "active": d.active
+        } for d in encres])
     
-    #numTag = request.args.get("numTag")
-    #limit = min(int(request.args.get("limit", "200")), 2000)
-    #query = ConnectionLog.query
-    #if numTag:
-    #    query = query.filter_by(numTag=numTag)
-    #logs = query.order_by(ConnectionLog.timestamp.desc()).limit(limit).all()
-    #return jsonify([{"numTag": l.numTag, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
+    if request.method == "POST":
+        data = request.json or {}
+        encre_id = data.get("encre_id")
+        encre_name = data.get("encre_name")
+        if not encre_id or not encre_name:
+            return jsonify({"error": "encre_id and encre_name required"}), 400
+        if EncreDevice.query.filter_by(encre_id=encre_id).first():
+            return jsonify({"error": "encre_exists"}), 400
+        d = EncreDevice(
+            encre_id=encre_id, 
+            encre_name=encre_name,
+            description=data.get("description", "")
+        )
+        db.session.add(d)
+        db.session.commit()
+        return jsonify({"ok": True})
+    
+    if request.method == "PUT":
+        data = request.json or {}
+        encre_id = data.get("encre_id")
+        encre = EncreDevice.query.filter_by(encre_id=encre_id).first()
+        if not encre:
+            return jsonify({"error": "not_found"}), 404
+        if "encre_name" in data:
+            encre.encre_name = data["encre_name"]
+        if "description" in data:
+            encre.description = data["description"]
+        if "active" in data:
+            encre.active = data["active"]
+        db.session.commit()
+        return jsonify({"ok": True})
+    
+    if request.method == "DELETE":
+        data = request.json or {}
+        encre_id = data.get("encre_id")
+        encre = EncreDevice.query.filter_by(encre_id=encre_id).first()
+        if not encre:
+            return jsonify({"error": "not_found"}), 404
+        db.session.delete(encre)
+        db.session.commit()
+        return jsonify({"ok": True})
+
+@server.route("/api/admin/card_rules/<card_id>", methods=["GET"])
+@require_admin
+def get_card_rules(card_id):
+    rules = AccessRule.query.filter_by(card_id=card_id).all()
+    return jsonify([{
+        "id": r.id,
+        "card_id": r.card_id,
+        "door_id": r.door_id,
+        "access_from": r.access_from.isoformat() if r.access_from else "",
+        "access_to": r.access_to.isoformat() if r.access_to else "",
+        "attributes": r.attributes
+    } for r in rules])
 
 
 # -----------------------
@@ -535,7 +649,7 @@ def admin_logs_connection():
 # -----------------------
 app = Dash(__name__, server=server, url_base_pathname="/", suppress_callback_exceptions=True)
 app.title = 'Spark door access admin'
-app._faicon = ("assets/sparkmicro_rgb")
+app._faicon = ("assets/sparkmicro_rgb.ico")
 
 # Simple top layout: header with login/logout, sections to manage cards, rules, logs
 app.layout = html.Div([
@@ -548,12 +662,28 @@ app.layout = html.Div([
 
     dcc.Tabs(id="tabs", children=[
         dcc.Tab(label="Cards", value="cards"),
+        dcc.Tab(label="Encres", value="encres"),
         dcc.Tab(label="Access Rules", value="rules"),
         dcc.Tab(label="Logs", value="logs"),
         dcc.Tab(label="Connection Logs", value="logs_connection"),
         dcc.Tab(label="Pi Devices (Admin)", value="pi")
     ], value="cards"),
-    html.Div(id="tab-content")
+    html.Div(id="tab-content"),
+    
+    # Modal for editing rules
+    html.Div(id="edit-rules-modal", style={"display": "none"}, children=[
+        html.Div(style={
+            "position": "fixed", "top": "50%", "left": "50%",
+            "transform": "translate(-50%, -50%)",
+            "backgroundColor": "white", "padding": "20px",
+            "border": "1px solid black", "zIndex": "1000",
+            "minWidth": "500px"
+        }, children=[
+            html.H3(id="modal-title"),
+            html.Div(id="modal-content"),
+            html.Button("Close", id="close-modal-btn")
+        ])
+    ])
 ])
 
 # -----------------------
@@ -575,7 +705,6 @@ def update_user_info(_):
 @app.callback(Output("tab-content", "children"), [Input("tabs", "value")])
 def render_tab(tab):
     if tab == "cards":
-        # cards management
         cards = Card.query.all()
         df = pd.DataFrame([{"card_id": c.card_id, "owner": c.owner, "active": c.active} for c in cards])
         return html.Div([
@@ -589,20 +718,54 @@ def render_tab(tab):
             html.Div([
                 dcc.Input(id="new-card-id", placeholder="card id (tag)", type="text"),
                 dcc.Input(id="new-card-owner", placeholder="owner", type="text"),
-                html.Button("Add Card", id="add-card-btn")
+                html.Button("Add Card", id="add-card-btn"),
+                html.Button("Edit Rules", id="edit-rules-btn", style={"marginLeft": "10px"}),
             ]),
             html.Button("Delete Selected Card", id="delete-card-btn"),
             html.Div(id="cards-msg")
         ])
+    
+    if tab == "encres":
+        encres = EncreDevice.query.all()
+        df = pd.DataFrame([{
+            "encre_id": d.encre_id,
+            "encre_name": d.encre_name,
+            "description": d.description,
+            "active": d.active
+        } for d in encres])
+        return html.Div([
+            html.H3("Encres / Doors"),
+            dash_table.DataTable(
+                id="encres-table",
+                columns=[{"name": c, "id": c} for c in df.columns],
+                data=df.to_dict("records"),
+                row_selectable="single",
+                editable=True
+            ),
+            html.Div([
+                dcc.Input(id="new-encre-id", placeholder="encre id (unique)", type="text"),
+                dcc.Input(id="new-encre-name", placeholder="encre name", type="text"),
+                dcc.Input(id="new-encre-desc", placeholder="description", type="text"),
+                html.Button("Add Encre", id="add-encre-btn")
+            ]),
+            html.Button("Delete Selected Encre", id="delete-encre-btn"),
+            html.Div(id="encres-msg")
+        ])
+    
     if tab == "rules":
         rules = AccessRule.query.all()
+        encres = EncreDevice.query.all()
+        encre_names = {d.encre_id: d.encre_name for d in encres}
+        
         df = pd.DataFrame([{
             "id": r.id,
             "card_id": r.card_id,
+            "encre": encre_names.get(r.encre_id, r.encre_id or "All"),
             "access_from": r.access_from.isoformat() if r.access_from else "",
             "access_to": r.access_to.isoformat() if r.access_to else "",
             "attributes": r.attributes
         } for r in rules])
+        
         return html.Div([
             html.H3("Access Rules"),
             dash_table.DataTable(
@@ -613,6 +776,13 @@ def render_tab(tab):
             ),
             html.Div([
                 dcc.Input(id="rule-card-id", placeholder="card id", type="text"),
+                html.Label("Select Encre/Door:"),
+                dcc.RadioItems(
+                    id="rule-encre-select",
+                    options=[{"label": "All Encres", "value": ""}] + 
+                            [{"label": d.encre_name, "value": d.encre_id} for d in encres],
+                    value=""
+                ),
                 dcc.Input(id="rule-from", placeholder="HH:MM", type="text"),
                 dcc.Input(id="rule-to", placeholder="HH:MM", type="text"),
                 dcc.Input(id="rule-attrs", placeholder='attributes JSON', type="text"),
@@ -621,6 +791,7 @@ def render_tab(tab):
             html.Button("Delete Selected Rule", id="delete-rule-btn"),
             html.Div(id="rules-msg")
         ])
+    
     if tab == "logs":
         logs = AccessLog.query.order_by(AccessLog.timestamp.desc()).limit(200).all()
         df = pd.DataFrame([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
@@ -634,8 +805,8 @@ def render_tab(tab):
             ),
             html.Button("Refresh", id="refresh-logs")
         ])
+    
     if tab == "logs_connection":
-        
         logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
         data = [{
             "numTag": l.numTag,
@@ -643,7 +814,6 @@ def render_tab(tab):
             "last_connection": l.last_connection.isoformat() if l.last_connection else ""
         } for l in logs]
         df = pd.DataFrame(data, columns=["numTag", "tagEncre", "last_connection"])
-
         return html.Div([
              html.H3("Connection Logs"),
              dash_table.DataTable(
@@ -653,7 +823,8 @@ def render_tab(tab):
                  page_size=20
              ),
              html.Button("Refresh", id="refresh-connection-logs")
-         ])
+        ])
+    
     if tab == "pi":
         devices = PiDevice.query.all()
         df = pd.DataFrame([{"device_id": d.device_id, "description": d.description, "enabled": d.enabled} for d in devices])
@@ -709,21 +880,25 @@ def handle_cards(add_click, delete_click, new_card_id, new_card_owner, selected_
 @app.callback(
     Output("rules-msg", "children"),
     [Input("add-rule-btn", "n_clicks"), Input("delete-rule-btn", "n_clicks")],
-    [State("rule-card-id", "value"), State("rule-from", "value"), State("rule-to", "value"), State("rule-attrs", "value"),
+    [State("rule-card-id", "value"), State("rule-encre-select", "value"),
+     State("rule-from", "value"), State("rule-to", "value"), State("rule-attrs", "value"),
      State("rules-table", "selected_rows"), State("rules-table", "data")]
 )
-def handle_rules(add_click, delete_click, card_id, rfrom, rto, rattrs, selected_rows, table_data):
+def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, rattrs, selected_rows, table_data):
     triggered = ctx.triggered_id
     if triggered == "add-rule-btn":
         if not card_id:
             return "card_id required"
-        # parse attributes
         try:
             attrs = json.loads(rattrs) if rattrs else {}
         except Exception as e:
             return f"Invalid attributes JSON: {e}"
         res = server.test_client().post("/api/admin/access_rule", json={
-            "card_id": card_id, "access_from": rfrom, "access_to": rto, "attributes": attrs
+            "card_id": card_id,
+            "encre_id": encre_id if encre_id else None,
+            "access_from": rfrom,
+            "access_to": rto,
+            "attributes": attrs
         })
         if res.status_code == 200:
             return "Rule added"
@@ -772,6 +947,92 @@ def handle_pi(add_click, toggle_click, new_id, new_desc, new_api_key, selected_r
         db.session.commit()
         return f"Device {device_id} enabled={d.enabled}"
     return ""
+
+@app.callback(
+    Output("encres-msg", "children"),
+    [Input("add-encre-btn", "n_clicks"), Input("delete-encre-btn", "n_clicks")],
+    [State("new-encre-id", "value"), State("new-encre-name", "value"), 
+     State("new-encre-desc", "value"), State("encres-table", "selected_rows"), 
+     State("encres-table", "data")]
+)
+def handle_encres(add_click, delete_click, new_id, new_name, new_desc, selected_rows, table_data):
+    triggered = ctx.triggered_id
+    if triggered == "add-encre-btn":
+        if not new_id or not new_name:
+            return "encre_id and encre_name required"
+        res = server.test_client().post("/api/admin/encres", json={
+            "encre_id": new_id, 
+            "encre_name": new_name,
+            "description": new_desc or ""
+        })
+        if res.status_code == 200:
+            return "Encre added"
+        else:
+            return f"Error: {res.get_json()}"
+    if triggered == "delete-encre-btn":
+        if not selected_rows:
+            return "Select a row first"
+        row = table_data[selected_rows[0]]
+        encre_id = row["encre_id"]
+        res = server.test_client().delete("/api/admin/encres", json={"encre_id": encre_id})
+        if res.status_code == 200:
+            return "Encre deleted"
+        else:
+            return f"Error: {res.get_json()}"
+    return ""
+
+@app.callback(
+    [Output("edit-rules-modal", "style"), Output("modal-content", "children")],
+    [Input("edit-rules-btn", "n_clicks"), Input("close-modal-btn", "n_clicks")],
+    [State("cards-table", "selected_rows"), State("cards-table", "data")]
+)
+def handle_edit_rules(edit_click, close_click, selected_rows, table_data):
+    triggered = ctx.triggered_id
+    if triggered == "edit-rules-btn":
+        if not selected_rows:
+            return {"display": "none"}, []
+        
+        row = table_data[selected_rows[0]]
+        card_id = row["card_id"]
+        
+        # Fetch rules for this card
+        res = server.test_client().get(f"/api/admin/card_rules/{card_id}")
+        rules = res.get_json()
+        
+        # Fetch available encres
+        encres_res = server.test_client().get("/api/admin/encres")
+        encres = encres_res.get_json()
+        
+        content = [
+            html.H4(f"Rules for Card: {card_id}"),
+            html.Div([
+                html.Div([
+                    html.P(f"Rule {r['id']}: Encre={r['encre_id'] or 'All'}, "
+                           f"From={r['access_from']}, To={r['access_to']}"),
+                    html.Button(f"Delete Rule {r['id']}", id={"type": "del-rule", "index": r['id']})
+                ]) for r in rules
+            ]),
+            html.Hr(),
+            html.H5("Add New Rule"),
+            html.Label("Encre:"),
+            dcc.RadioItems(
+                id="modal-encre-select",
+                options=[{"label": "All Encres", "value": ""}] + 
+                        [{"label": d['encre_name'], "value": d['encre_id']} for d in encres],
+                value=""
+            ),
+            dcc.Input(id="modal-from", placeholder="HH:MM", type="text"),
+            dcc.Input(id="modal-to", placeholder="HH:MM", type="text"),
+            html.Button("Add Rule", id="modal-add-rule-btn"),
+            dcc.Store(id="modal-card-id", data=card_id)
+        ]
+        
+        return {"display": "block"}, content
+    
+    if triggered == "close-modal-btn":
+        return {"display": "none"}, []
+    
+    return {"display": "none"}, []
 
 # -----------------------
 # Initialize DB helper route (for dev only)
