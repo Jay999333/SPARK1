@@ -117,7 +117,6 @@ class AccessRule(db.Model):
     encre_id = db.Column(db.String(128), db.ForeignKey("encre_devices.encre_id"), nullable=True)
     access_from = db.Column(db.Time, nullable=True)
     access_to = db.Column(db.Time, nullable=True)
-    attributes = db.Column(db.Text)
 
 class AccessLog(db.Model):
     __tablename__ = "access_logs"
@@ -451,26 +450,35 @@ def admin_cards():
         data = request.json or {}
         card_id = data.get("card_id")
         owner = data.get("owner")
+        
         if not card_id:
             return jsonify({"error": "card_id required"}), 400
+        
+        # Check if card already exists
         if Card.query.filter_by(card_id=card_id).first():
             return jsonify({"error": "card_exists"}), 400
         
-        # Create card
-        c = Card(card_id=card_id, owner=owner)
-        db.session.add(c)
-        
-        # Create default deny rule (no access) with encre_id set to None
-        default_rule = AccessRule(
-            card_id=card_id,
-            encre_id=None,
-            access_from=None,
-            access_to=None,
-            attributes=json.dumps({"default": "no_access"})
-        )
-        db.session.add(default_rule)
-        db.session.commit()
-        return jsonify({"ok": True})
+        try:
+            # Create card
+            c = Card(card_id=card_id, owner=owner)
+            db.session.add(c)
+            db.session.flush()  # Flush to get the card inserted before the rule
+            
+            # Create default deny rule (no access)
+            default_rule = AccessRule(
+                card_id=card_id,
+                encre_id=None,
+                access_from=None,
+                access_to=None
+            )
+            db.session.add(default_rule)
+            db.session.commit()
+            
+            return jsonify({"ok": True})
+            
+        except Exception as e:
+            db.session.rollback()  # Rollback on any error
+            return jsonify({"error": str(e)}), 500
     
     if request.method == "DELETE":
         data = request.json or {}
@@ -479,11 +487,16 @@ def admin_cards():
         if not c:
             return jsonify({"error": "not_found"}), 404
         
-        # Delete associated rules
-        AccessRule.query.filter_by(card_id=card_id).delete()
-        db.session.delete(c)
-        db.session.commit()
-        return jsonify({"ok": True})
+        try:
+            # Delete associated rules (should cascade automatically)
+            AccessRule.query.filter_by(card_id=card_id).delete()
+            db.session.delete(c)
+            db.session.commit()
+            return jsonify({"ok": True})
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
 
 @server.route("/api/admin/access_rule", methods=["POST", "PUT", "DELETE"])
 @require_admin
@@ -494,7 +507,6 @@ def admin_access_rule():
         encre_id = data.get("encre_id")
         access_from = data.get("access_from")
         access_to = data.get("access_to")
-        attributes = data.get("attributes", {})
         
         if not card_id:
             return jsonify({"error": "card_id required"}), 400
@@ -510,8 +522,7 @@ def admin_access_rule():
             card_id=card_id,
             encre_id=encre_id if encre_id else None,
             access_from=atime_from,
-            access_to=atime_to,
-            attributes=json.dumps(attributes)
+            access_to=atime_to
         )
         db.session.add(ar)
         db.session.commit()
@@ -530,8 +541,6 @@ def admin_access_rule():
             rule.access_from = datetime.datetime.strptime(data["access_from"], "%H:%M").time()
         if "access_to" in data and data["access_to"]:
             rule.access_to = datetime.datetime.strptime(data["access_to"], "%H:%M").time()
-        if "attributes" in data:
-            rule.attributes = json.dumps(data["attributes"])
         
         db.session.commit()
         return jsonify({"ok": True})
@@ -637,10 +646,9 @@ def get_card_rules(card_id):
     return jsonify([{
         "id": r.id,
         "card_id": r.card_id,
-        "door_id": r.door_id,
+        "encre_id": r.encre_id,  # ← CHANGE THIS LINE (was door_id)
         "access_from": r.access_from.isoformat() if r.access_from else "",
-        "access_to": r.access_to.isoformat() if r.access_to else "",
-        "attributes": r.attributes
+        "access_to": r.access_to.isoformat() if r.access_to else ""
     } for r in rules])
 
 
@@ -762,8 +770,7 @@ def render_tab(tab):
             "card_id": r.card_id,
             "encre": encre_names.get(r.encre_id, r.encre_id or "All"),
             "access_from": r.access_from.isoformat() if r.access_from else "",
-            "access_to": r.access_to.isoformat() if r.access_to else "",
-            "attributes": r.attributes
+            "access_to": r.access_to.isoformat() if r.access_to else ""
         } for r in rules])
         
         return html.Div([
@@ -779,13 +786,13 @@ def render_tab(tab):
                 html.Label("Select Encre/Door:"),
                 dcc.RadioItems(
                     id="rule-encre-select",
-                    options=[{"label": "All Encres", "value": ""}] + 
+                    options=[{"label": "None", "value": ""}] + 
+                            [{"label": "All Encres", "value": "all"}] + 
                             [{"label": d.encre_name, "value": d.encre_id} for d in encres],
                     value=""
                 ),
                 dcc.Input(id="rule-from", placeholder="HH:MM", type="text"),
                 dcc.Input(id="rule-to", placeholder="HH:MM", type="text"),
-                dcc.Input(id="rule-attrs", placeholder='attributes JSON', type="text"),
                 html.Button("Add Rule", id="add-rule-btn")
             ]),
             html.Button("Delete Selected Rule", id="delete-rule-btn"),
@@ -852,53 +859,77 @@ def render_tab(tab):
 @app.callback(
     Output("cards-msg", "children"),
     [Input("add-card-btn", "n_clicks"), Input("delete-card-btn", "n_clicks")],
-    [State("new-card-id", "value"), State("new-card-owner", "value"), State("cards-table", "selected_rows"), State("cards-table", "data")]
+    [State("new-card-id", "value"), State("new-card-owner", "value"), 
+     State("cards-table", "selected_rows"), State("cards-table", "data")]
 )
 def handle_cards(add_click, delete_click, new_card_id, new_card_owner, selected_rows, table_data):
     triggered = ctx.triggered_id
+    
     if triggered == "add-card-btn":
         if not new_card_id:
             return "card_id required"
-        # server call
-        res = server.test_client().post("/api/admin/cards", json={"card_id": new_card_id, "owner": new_card_owner})
-        if res.status_code == 200:
-            return "Card added"
-        else:
-            return f"Error: {res.get_json()}"
+        
+        try:
+            res = server.test_client().post(
+                "/api/admin/cards", 
+                json={"card_id": new_card_id, "owner": new_card_owner or ""},
+                content_type='application/json'
+            )
+            
+            if res.status_code == 200:
+                return "Card added successfully with default deny rule"
+            else:
+                try:
+                    error_data = res.get_json()
+                    return f"Error: {error_data.get('error', 'Unknown error')}"
+                except:
+                    return f"Error: Status {res.status_code}"
+        except Exception as e:
+            return f"Exception: {str(e)}"
+    
     if triggered == "delete-card-btn":
         if not selected_rows:
             return "Select a row first"
         row = table_data[selected_rows[0]]
         card_id = row["card_id"]
-        res = server.test_client().delete("/api/admin/cards", json={"card_id": card_id})
-        if res.status_code == 200:
-            return "Card deleted"
-        else:
-            return f"Error: {res.get_json()}"
+        
+        try:
+            res = server.test_client().delete(
+                "/api/admin/cards", 
+                json={"card_id": card_id},
+                content_type='application/json'
+            )
+            
+            if res.status_code == 200:
+                return "Card deleted"
+            else:
+                try:
+                    error_data = res.get_json()
+                    return f"Error: {error_data.get('error', 'Unknown error')}"
+                except:
+                    return f"Error: Status {res.status_code}"
+        except Exception as e:
+            return f"Exception: {str(e)}"
+    
     return ""
 
 @app.callback(
     Output("rules-msg", "children"),
     [Input("add-rule-btn", "n_clicks"), Input("delete-rule-btn", "n_clicks")],
     [State("rule-card-id", "value"), State("rule-encre-select", "value"),
-     State("rule-from", "value"), State("rule-to", "value"), State("rule-attrs", "value"),
+     State("rule-from", "value"), State("rule-to", "value"),
      State("rules-table", "selected_rows"), State("rules-table", "data")]
 )
-def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, rattrs, selected_rows, table_data):
+def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, selected_rows, table_data):
     triggered = ctx.triggered_id
     if triggered == "add-rule-btn":
         if not card_id:
             return "card_id required"
-        try:
-            attrs = json.loads(rattrs) if rattrs else {}
-        except Exception as e:
-            return f"Invalid attributes JSON: {e}"
         res = server.test_client().post("/api/admin/access_rule", json={
             "card_id": card_id,
             "encre_id": encre_id if encre_id else None,
             "access_from": rfrom,
-            "access_to": rto,
-            "attributes": attrs
+            "access_to": rto
         })
         if res.status_code == 200:
             return "Rule added"
@@ -1017,8 +1048,9 @@ def handle_edit_rules(edit_click, close_click, selected_rows, table_data):
             html.Label("Encre:"),
             dcc.RadioItems(
                 id="modal-encre-select",
-                options=[{"label": "All Encres", "value": ""}] + 
-                        [{"label": d['encre_name'], "value": d['encre_id']} for d in encres],
+                options=[{"label": "All Encres", "value": "all"}] + 
+                        [{"label": d['encre_name'], "value": d['encre_id']} for d in encres] +
+                        [{"label": "None (Deny All)", "value": ""}],
                 value=""
             ),
             dcc.Input(id="modal-from", placeholder="HH:MM", type="text"),
