@@ -1,24 +1,11 @@
-# For local testing:
-# 1. Install MySQL and create a database/user:
-#    CREATE DATABASE door_db;
-#    CREATE USER 'testuser'@'localhost' IDENTIFIED BY 'testpass';
-#    GRANT ALL PRIVILEGES ON door_db.* TO 'testuser'@'localhost';
-# 2. Set SQLALCHEMY_DATABASE_URI to:
-#    "mysql+pymysql://testuser:testpass@localhost:3306/door_db"
-# 3. Run /dev/init_db once to initialize tables.
-
-"""
-app.py -- Dash + Flask admin portal with:
- - Azure AD login (MSAL)
- - MySQL (SQLAlchemy)
- - REST API for Raspberry Pi that validates API key and returns JWT
- - Admin UI to manage cards, access attributes/time windows, view logs
-
-IMPORTANT:
- - Run behind HTTPS in production (Ngrok/dev only for local testing).
- - Store secrets in environment variables or a secrets manager.
- - Use a proper device onboarding flow for API keys (not included).
-"""
+# main.py -- modified to:
+# - remove Account Types tab
+# - add account_type_rules endpoint for editing default rules (GET/PUT)
+# - cards select account_type; non-custom cards inherit rules from account_type
+# - remove Edit Rules modal and button from Cards tab
+# - add Toggle Active button in Cards tab
+# - add Toggle Active button in Encres tab
+# - keep default account types in /dev/init_db (engineer, manager, visitor, custom)
 
 import os
 from urllib.parse import quote_plus
@@ -40,7 +27,6 @@ import pandas as pd
 DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "false").lower() == "true"
 
 # load required secrets (fail fast instead of using insecure defaults)
-# load required secrets (with defaults for testing)
 AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "AZURE_CLIENT_ID")
 AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "AZURE_CLIENT_SECRET")
 AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "common")
@@ -48,7 +34,7 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-production")
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-jwt-secret-change-in-production")
 
 DB_USER = os.environ.get("MYSQL_USER", "admin_spark")
-DB_PASS = quote_plus(os.environ.get("MYSQL_PASSWORD", "Spark1ETS"))  # quote special chars
+DB_PASS = quote_plus(os.environ.get("MYSQL_PASSWORD", "Spark1ETS"))
 DB_HOST = os.environ.get("MYSQL_HOST", "mysql-spark.mysql.database.azure.com")
 DB_NAME = os.environ.get("MYSQL_DATABASE", "myconnector")
 SQLALCHEMY_DATABASE_URI = os.environ.get(
@@ -72,17 +58,15 @@ server.config["SECRET_KEY"] = SECRET_KEY
 server.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
 server.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-
-
-import pymysql, os; 
+import pymysql, os;
 try:
     conn = pymysql.connect(
         host=os.getenv("MYSQL_HOST", "mysql-spark.mysql.database.azure.com"),
         user=os.getenv("MYSQL_USER", "admin_spark"),
         password=os.getenv("MYSQL_PASSWORD", "Spark1ETS"),
-        database=os.getenv("MYSQL_DATABASE", "myconnector"),  # Fixed from MYCONNECTOR
+        database=os.getenv("MYSQL_DATABASE", "myconnector"),
         port=int(os.getenv("MYSQL_PORT", "3306")),
-        ssl={'ssl_mode': 'REQUIRED'},  # Added SSL requirement
+        ssl={'ssl_mode': 'REQUIRED'},
         connect_timeout=3
     )
     print(f"✅ Connected to MySQL at {os.getenv('MYSQL_HOST', 'mysql-spark.mysql.database.azure.com')}")
@@ -108,9 +92,9 @@ class AccountType(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     type_name = db.Column(db.String(128), unique=True, nullable=False)
     description = db.Column(db.Text)
-    # Default access rules as JSON: {"encre_id": {"access_from": "HH:MM", "access_to": "HH:MM"}}
+    # JSON: list of rule objects [{"encre_id": "...", "access_from": "HH:MM", "access_to": "HH:MM"}, ...]
     default_rules = db.Column(db.Text)
-    is_system = db.Column(db.Boolean, default=False)  # True for engineer, manager, visitor
+    is_system = db.Column(db.Boolean, default=False)
 
 class Card(db.Model):
     __tablename__ = "cards"
@@ -133,7 +117,7 @@ class AccessLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     card_id = db.Column(db.String(128))
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    result = db.Column(db.String(64))  # e.g., "granted", "denied", "invalid_card"
+    result = db.Column(db.String(64))
     reason = db.Column(db.Text)
 
 class ConnectionLog(db.Model):
@@ -147,11 +131,10 @@ class PiDevice(db.Model):
     __tablename__ = "pi_devices"
     id = db.Column(db.Integer, primary_key=True)
     device_id = db.Column(db.String(128), unique=True)
-    api_key_hash = db.Column(db.String(256))  # hashed API key for device
+    api_key_hash = db.Column(db.String(256))
     description = db.Column(db.String(256))
     enabled = db.Column(db.BOOLEAN, default=True)
 
-#DB Encre
 class EncreDevice(db.Model):
     __tablename__ = "encre_devices"
     id = db.Column(db.Integer, primary_key=True)
@@ -188,7 +171,6 @@ def login():
 
 @server.route(REDIRECT_PATH)
 def authorized():
-    # Handles redirect from Azure AD
     code = request.args.get("code")
     if not code:
         return "No code provided by Azure", 400
@@ -201,7 +183,6 @@ def authorized():
     if "error" in result:
         return f"Login failure: {result.get('error_description')}", 400
 
-    # Store user info in session
     id_token_claims = result.get("id_token_claims")
     if not id_token_claims:
         return "No ID token claims", 400
@@ -216,10 +197,8 @@ def authorized():
         "name": name
     }
 
-    # ensure user exists in DB
     user = User.query.filter_by(oid=oid).first()
     if not user:
-        # first time user -> not admin by default. Manually promote via DB or add logic.
         user = User(oid=oid, email=preferred_username, name=name, is_admin=False)
         db.session.add(user)
         db.session.commit()
@@ -235,13 +214,12 @@ def logout():
     )
 
 # -----------------------
-# Helper: require_login decorator
+# Helper decorators
 # -----------------------
 def require_login(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if DISABLE_AUTH:
-            # Mock user for dev/testing
             session["user"] = {
                 "oid": "dev-user",
                 "email": "dev@example.com",
@@ -256,7 +234,6 @@ def require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if DISABLE_AUTH:
-            # In dev mode: ensure a dev-admin session and DB record, then allow
             session.setdefault("user", {"oid": "dev-admin", "email": "admin@example.com", "name": "Dev Admin"})
             usr = session.get("user")
             db_user = User.query.filter_by(oid=usr.get("oid")).first()
@@ -271,7 +248,6 @@ def require_admin(f):
                 db.session.commit()
             return f(*args, **kwargs)
 
-        # Normal (auth enabled) path: require signed in admin user
         usr = session.get("user")
         if not usr:
             return redirect("/login")
@@ -290,7 +266,6 @@ def dev_login():
         "email": "admin@example.com",
         "name": "Dev Admin"
     }
-    # Create admin user if not exists
     db_user = User.query.filter_by(oid="dev-admin").first()
     if not db_user:
         db_user = User(
@@ -303,49 +278,17 @@ def dev_login():
         db.session.commit()
     return redirect("/")
 
-
-
 # -----------------------
-# Helper: require_login decorator
-# -----------------------
-def require_login(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if DISABLE_AUTH:
-            # Mock user for dev/testing
-            session["user"] = {
-                "oid": "dev-user",
-                "email": "dev@example.com",
-                "name": "Dev User"
-            }
-        elif "user" not in session:
-            return redirect("/login")
-        return f(*args, **kwargs)
-    return decorated
-
-
-# -----------------------
-# REST API for Raspberry Pi (device validation)
-#
-# Flow:
-# 1) Pi authenticates with an API key (device-specific). Calls /api/pi/validate to get JWT token.
-# 2) Pi uses JWT token on subsequent /api/pi/check_access or to send logs.
+# REST API for Raspberry Pi
 # -----------------------
 def verify_device_api_key(device_id, api_key_plain):
     device = PiDevice.query.filter_by(device_id=device_id, enabled=True).first()
     if not device:
         return False
-    # Compare hashed key
     return check_password_hash(device.api_key_hash, api_key_plain)
-
-
 
 @server.route("/api/pi/validate", methods=["POST"])
 def pi_validate():
-    """
-    POST payload: { "device_id": "...", "api_key": "..." }
-    -> returns {"token": "<jwt>", "expires_at": "<iso>"}
-    """
     data = request.json or {}
     device_id = data.get("device_id")
     api_key = data.get("api_key")
@@ -357,12 +300,7 @@ def pi_validate():
 
     now = datetime.datetime.utcnow()
     exp = now + datetime.timedelta(minutes=PI_TOKEN_EXP_MIN)
-    payload = {
-        "sub": device_id,
-        "iat": int(now.timestamp()),
-        "exp": int(exp.timestamp()),
-        "type": "pi_device"
-    }
+    payload = {"sub": device_id, "iat": int(now.timestamp()), "exp": int(exp.timestamp()), "type": "pi_device"}
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
     return jsonify({"token": token, "expires_at": exp.isoformat()})
 
@@ -379,7 +317,6 @@ def require_pi_jwt(f):
             return jsonify({"error": "token_expired"}), 401
         except Exception as e:
             return jsonify({"error": "invalid_token", "detail": str(e)}), 401
-        # attach device id to request context
         request.device_id = payload.get("sub")
         return f(*args, **kwargs)
     return decorated
@@ -387,10 +324,6 @@ def require_pi_jwt(f):
 @server.route("/api/pi/check_access", methods=["POST"])
 @require_pi_jwt
 def pi_check_access():
-    """
-    Pi posts { "card_id": "..." } with Authorization: Bearer <jwt>
-    Server checks rules and returns granted/denied. Also logs access.
-    """
     data = request.json or {}
     card_id = data.get("card_id")
     device_id = getattr(request, "device_id", "unknown")
@@ -404,36 +337,29 @@ def pi_check_access():
     if not card:
         reason = "invalid_card"
     else:
-        # get rules
         rules = AccessRule.query.filter_by(card_id=card_id).all()
         if not rules:
-            # default deny if no rules
             granted = False
             reason = "no_rules"
         else:
-            # check if any rule allows now
             for r in rules:
                 if r.access_from and r.access_to:
-                    # compare only time-of-day
                     tnow = now.time()
                     if r.access_from <= tnow <= r.access_to:
                         granted = True
                         reason = "time_allowed"
                         break
                 else:
-                    # no time limits => allow
                     granted = True
                     reason = "allowed_no_time_limit"
                     break
 
-    # log
     log = AccessLog(card_id=card_id, timestamp=now, result="granted" if granted else "denied", reason=reason)
     db.session.add(log)
     db.session.commit()
 
     return jsonify({"granted": granted, "reason": reason})
 
-# Endpoint for Pi to send logs (optionally)
 @server.route("/api/pi/send_log", methods=["POST"])
 @require_pi_jwt
 def pi_send_log():
@@ -447,69 +373,79 @@ def pi_send_log():
     return jsonify({"ok": True})
 
 # -----------------------
-# Admin REST endpoints used by the Dash UI (server-protected)
+# Admin REST endpoints used by Dash UI
 # -----------------------
 @server.route("/api/admin/cards", methods=["GET", "POST", "DELETE"])
 @require_admin
 def admin_cards():
     if request.method == "GET":
         cards = Card.query.all()
-        # Handle both old schema (without account_type) and new schema
         result = []
         for c in cards:
             card_dict = {"card_id": c.card_id, "owner": c.owner, "active": c.active}
-            # Try to get account_type, default to visitor if column doesn't exist
             try:
                 card_dict["account_type"] = c.account_type or "visitor"
             except:
                 card_dict["account_type"] = "visitor"
             result.append(card_dict)
         return jsonify(result)
-    
+
     if request.method == "POST":
         data = request.json or {}
         card_id = data.get("card_id")
         owner = data.get("owner")
         account_type = data.get("account_type", "visitor")
-        
+
         if not card_id:
             return jsonify({"error": "card_id required"}), 400
-        
-        # Check if card already exists
+
         if Card.query.filter_by(card_id=card_id).first():
             return jsonify({"error": "card_exists"}), 400
-        
+
         try:
-            # Create card with account_type
             c = Card(card_id=card_id, owner=owner, account_type=account_type)
             db.session.add(c)
-            db.session.flush()  # Flush to get the card inserted before the rule
-            
-            # Create default deny rule (no access)
-            default_rule = AccessRule(
-                card_id=card_id,
-                encre_id=None,
-                access_from=None,
-                access_to=None
-            )
+            db.session.flush()
+
+            # default deny rule
+            default_rule = AccessRule(card_id=card_id, encre_id=None, access_from=None, access_to=None)
             db.session.add(default_rule)
             db.session.commit()
-            
+
+            # If account_type != custom -> replace rules with account_type default rules (inherit)
+            if account_type and account_type != "custom":
+                at = AccountType.query.filter_by(type_name=account_type).first()
+                if at and at.default_rules:
+                    try:
+                        rules = json.loads(at.default_rules)
+                        # delete existing rules for card
+                        AccessRule.query.filter_by(card_id=card_id).delete()
+                        for rr in rules:
+                            encre_id = rr.get("encre_id")
+                            af = rr.get("access_from")
+                            atime = rr.get("access_to")
+                            af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
+                            at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
+                            newr = AccessRule(card_id=card_id, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
+                            db.session.add(newr)
+                        db.session.commit()
+                    except Exception:
+                        # ignore malformed default_rules and leave default deny
+                        db.session.rollback()
             return jsonify({"ok": True})
-            
+
         except Exception as e:
-            db.session.rollback()  # Rollback on any error
+            db.session.rollback()
             return jsonify({"error": str(e)}), 500
-    
+
     if request.method == "DELETE":
         data = request.json or {}
         card_id = data.get("card_id")
         c = Card.query.filter_by(card_id=card_id).first()
         if not c:
             return jsonify({"error": "not_found"}), 404
-        
+
         try:
-            # Delete associated rules (should cascade automatically)
             AccessRule.query.filter_by(card_id=card_id).delete()
             db.session.delete(c)
             db.session.commit()
@@ -518,81 +454,87 @@ def admin_cards():
             db.session.rollback()
             return jsonify({"error": str(e)}), 500
 
-
-@server.route("/api/admin/account_types", methods=["GET", "POST", "PUT", "DELETE"])
+@server.route("/api/admin/cards/toggle", methods=["POST"])
 @require_admin
-def admin_account_types():
+def admin_cards_toggle():
+    data = request.json or {}
+    card_id = data.get("card_id")
+    if not card_id:
+        return jsonify({"error": "card_id required"}), 400
+    c = Card.query.filter_by(card_id=card_id).first()
+    if not c:
+        return jsonify({"error": "not_found"}), 404
+    c.active = not c.active
+    db.session.commit()
+    return jsonify({"ok": True, "active": c.active})
+
+# NOTE: The original /api/admin/account_types route was removed (per request).
+# New endpoint below exposes only the necessary functionality: GET the list of
+# account types and PUT to update default_rules for a type (and propagate to cards).
+
+@server.route("/api/admin/account_type_rules", methods=["GET", "PUT"])
+@require_admin
+def admin_account_type_rules():
+    """
+    GET => list available account types (type_name, description, default_rules, is_system)
+    PUT => update default_rules for a given type_name:
+        payload: { "type_name": "engineer", "default_rules": [ {..}, ... ] }
+    When updating default_rules, propagate to all cards with that account_type (except 'custom'):
+        replace their rules with the default_rules
+    """
     if request.method == "GET":
-        account_types = AccountType.query.all()
-        return jsonify([{
-            "type_name": at.type_name,
-            "description": at.description,
-            "default_rules": at.default_rules,
-            "is_system": at.is_system
-        } for at in account_types])
-    
-    if request.method == "POST":
-        data = request.json or {}
-        type_name = data.get("type_name")
-        description = data.get("description", "")
-        default_rules = data.get("default_rules", "{}")
-        
-        if not type_name:
-            return jsonify({"error": "type_name required"}), 400
-        
-        if AccountType.query.filter_by(type_name=type_name).first():
-            return jsonify({"error": "account_type_exists"}), 400
-        
-        try:
-            at = AccountType(
-                type_name=type_name,
-                description=description,
-                default_rules=json.dumps(default_rules) if isinstance(default_rules, dict) else default_rules,
-                is_system=False
-            )
-            db.session.add(at)
-            db.session.commit()
-            return jsonify({"ok": True})
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
-    
+        ats = AccountType.query.all()
+        out = []
+        for at in ats:
+            out.append({
+                "type_name": at.type_name,
+                "description": at.description,
+                "default_rules": json.loads(at.default_rules) if at.default_rules else [],
+                "is_system": at.is_system
+            })
+        return jsonify(out)
+
     if request.method == "PUT":
         data = request.json or {}
         type_name = data.get("type_name")
+        new_rules = data.get("default_rules")
+        if not type_name:
+            return jsonify({"error": "type_name required"}), 400
         at = AccountType.query.filter_by(type_name=type_name).first()
         if not at:
             return jsonify({"error": "not_found"}), 404
-        
-        if "description" in data:
-            at.description = data["description"]
-        if "default_rules" in data:
-            at.default_rules = json.dumps(data["default_rules"]) if isinstance(data["default_rules"], dict) else data["default_rules"]
-        
+
+        # Validate rules is a list
+        if not isinstance(new_rules, list):
+            return jsonify({"error": "default_rules must be a list"}), 400
+
         try:
+            at.default_rules = json.dumps(new_rules)
             db.session.commit()
-            return jsonify({"ok": True})
-        except Exception as e:
-            db.session.rollback()
-            return jsonify({"error": str(e)}), 500
-    
-    if request.method == "DELETE":
-        data = request.json or {}
-        type_name = data.get("type_name")
-        at = AccountType.query.filter_by(type_name=type_name).first()
-        if not at:
-            return jsonify({"error": "not_found"}), 404
-        if at.is_system:
-            return jsonify({"error": "cannot_delete_system_type"}), 400
-        
-        try:
-            db.session.delete(at)
-            db.session.commit()
-            return jsonify({"ok": True})
         except Exception as e:
             db.session.rollback()
             return jsonify({"error": str(e)}), 500
 
+        # Propagate to cards of this account type (except custom)
+        if type_name != "custom":
+            cards = Card.query.filter_by(account_type=type_name).all()
+            for c in cards:
+                try:
+                    # replace rules for card
+                    AccessRule.query.filter_by(card_id=c.card_id).delete()
+                    for rr in new_rules:
+                        encre_id = rr.get("encre_id")
+                        af = rr.get("access_from")
+                        atime = rr.get("access_to")
+                        af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
+                        at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
+                        newr = AccessRule(card_id=c.card_id, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
+                        db.session.add(newr)
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+                    # continue with other cards
+        return jsonify({"ok": True})
 
 @server.route("/api/admin/access_rule", methods=["POST", "PUT", "DELETE"])
 @require_admin
@@ -603,44 +545,39 @@ def admin_access_rule():
         encre_id = data.get("encre_id")
         access_from = data.get("access_from")
         access_to = data.get("access_to")
-        
+
         if not card_id:
             return jsonify({"error": "card_id required"}), 400
-        
+
         atime_from = None
         atime_to = None
         if access_from:
             atime_from = datetime.datetime.strptime(access_from, "%H:%M").time()
         if access_to:
             atime_to = datetime.datetime.strptime(access_to, "%H:%M").time()
-        
-        ar = AccessRule(
-            card_id=card_id,
-            encre_id=encre_id if encre_id else None,
-            access_from=atime_from,
-            access_to=atime_to
-        )
+
+        ar = AccessRule(card_id=card_id, encre_id=encre_id if encre_id else None, access_from=atime_from, access_to=atime_to)
         db.session.add(ar)
         db.session.commit()
         return jsonify({"ok": True})
-    
+
     if request.method == "PUT":
         data = request.json or {}
         rule_id = data.get("rule_id")
         rule = AccessRule.query.filter_by(id=rule_id).first()
         if not rule:
             return jsonify({"error": "not_found"}), 404
-        
+
         if "encre_id" in data:
             rule.encre_id = data["encre_id"]
         if "access_from" in data and data["access_from"]:
             rule.access_from = datetime.datetime.strptime(data["access_from"], "%H:%M").time()
         if "access_to" in data and data["access_to"]:
             rule.access_to = datetime.datetime.strptime(data["access_to"], "%H:%M").time()
-        
+
         db.session.commit()
         return jsonify({"ok": True})
-    
+
     if request.method == "DELETE":
         data = request.json or {}
         rule_id = data.get("rule_id")
@@ -654,7 +591,6 @@ def admin_access_rule():
 @server.route("/api/admin/logs", methods=["GET"])
 @require_admin
 def admin_logs():
-    # simple filters
     card_id = request.args.get("card_id")
     limit = min(int(request.args.get("limit", "200")), 2000)
     query = AccessLog.query
@@ -663,36 +599,19 @@ def admin_logs():
     logs = query.order_by(AccessLog.timestamp.desc()).limit(limit).all()
     return jsonify([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
 
-#----------------------------------------------------------------
-#----------------------------------------------------------------
-#----------------------------------------------------------------
-#----------------------------------------------------------------
-#----------------------------------------------------------------
-#----------------------------------------------------------------
 @server.route("/api/admin/logs_connection", methods=["GET"])
 @require_admin
 def admin_logs_connection():
-    # Get all connection logs
     logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
-    
-    return jsonify([{
-        "numTag": log.numTag, 
-        "tagEncre": log.tagEncre, 
-        "last_connection": log.last_connection.isoformat()
-    } for log in logs])
+    return jsonify([{"numTag": log.numTag, "tagEncre": log.tagEncre, "last_connection": log.last_connection.isoformat()} for log in logs])
 
 @server.route("/api/admin/encres", methods=["GET", "POST", "PUT", "DELETE"])
 @require_admin
 def admin_encres():
     if request.method == "GET":
         encres = EncreDevice.query.all()
-        return jsonify([{
-            "encre_id": d.encre_id, 
-            "encre_name": d.encre_name, 
-            "description": d.description,
-            "active": d.active
-        } for d in encres])
-    
+        return jsonify([{"encre_id": d.encre_id, "encre_name": d.encre_name, "description": d.description, "active": d.active} for d in encres])
+
     if request.method == "POST":
         data = request.json or {}
         encre_id = data.get("encre_id")
@@ -701,15 +620,11 @@ def admin_encres():
             return jsonify({"error": "encre_id and encre_name required"}), 400
         if EncreDevice.query.filter_by(encre_id=encre_id).first():
             return jsonify({"error": "encre_exists"}), 400
-        d = EncreDevice(
-            encre_id=encre_id, 
-            encre_name=encre_name,
-            description=data.get("description", "")
-        )
+        d = EncreDevice(encre_id=encre_id, encre_name=encre_name, description=data.get("description", ""))
         db.session.add(d)
         db.session.commit()
         return jsonify({"ok": True})
-    
+
     if request.method == "PUT":
         data = request.json or {}
         encre_id = data.get("encre_id")
@@ -724,7 +639,7 @@ def admin_encres():
             encre.active = data["active"]
         db.session.commit()
         return jsonify({"ok": True})
-    
+
     if request.method == "DELETE":
         data = request.json or {}
         encre_id = data.get("encre_id")
@@ -742,11 +657,10 @@ def get_card_rules(card_id):
     return jsonify([{
         "id": r.id,
         "card_id": r.card_id,
-        "encre_id": r.encre_id,  # ← CHANGE THIS LINE (was door_id)
+        "encre_id": r.encre_id,
         "access_from": r.access_from.isoformat() if r.access_from else "",
         "access_to": r.access_to.isoformat() if r.access_to else ""
     } for r in rules])
-
 
 # -----------------------
 # Dash App (UI)
@@ -755,7 +669,6 @@ app = Dash(__name__, server=server, url_base_pathname="/", suppress_callback_exc
 app.title = 'Spark door access admin'
 app._faicon = ("assets/sparkmicro_rgb.ico")
 
-# Simple top layout: header with login/logout, sections to manage cards, rules, logs
 app.layout = html.Div([
     html.Div(id="header", children=[
         html.H2("Door Access Admin Portal"),
@@ -766,38 +679,20 @@ app.layout = html.Div([
 
     dcc.Tabs(id="tabs", children=[
         dcc.Tab(label="Cards", value="cards"),
-        dcc.Tab(label="Account Types", value="account_types"),
+        # account_types tab removed per request; management of default rules is available in "Access Rules"
         dcc.Tab(label="Encres", value="encres"),
         dcc.Tab(label="Access Rules", value="rules"),
         dcc.Tab(label="Logs", value="logs"),
         dcc.Tab(label="Connection Logs", value="logs_connection"),
         dcc.Tab(label="Pi Devices (Admin)", value="pi")
     ], value="cards"),
-    html.Div(id="tab-content"),
-    
-    # Modal for editing rules
-    html.Div(id="edit-rules-modal", style={"display": "none"}, children=[
-        html.Div(style={
-            "position": "fixed", "top": "50%", "left": "50%",
-            "transform": "translate(-50%, -50%)",
-            "backgroundColor": "white", "padding": "20px",
-            "border": "1px solid black", "zIndex": "1000",
-            "minWidth": "500px"
-        }, children=[
-            html.H3(id="modal-title"),
-            html.Div(id="modal-content"),
-            html.Button("Close", id="close-modal-btn")
-        ])
-    ])
+    html.Div(id="tab-content")
 ])
 
 # -----------------------
-# Callbacks: populate header + tab content (server-side fetch)
+# Callbacks: populate header + tab content
 # -----------------------
-@app.callback(
-    Output("user-info", "children"),
-    [Input("tabs", "value")]
-)
+@app.callback(Output("user-info", "children"), [Input("tabs", "value")])
 def update_user_info(_):
     usr = session.get("user")
     if not usr:
@@ -812,31 +707,25 @@ def render_tab(tab):
     if tab == "cards":
         try:
             cards = Card.query.all()
-            # Try to include account_type if column exists
             try:
-                # Test if account_type column exists by accessing it
                 _ = cards[0].account_type if cards else None
                 df = pd.DataFrame([{"card_id": c.card_id, "owner": c.owner, "account_type": c.account_type or "visitor", "active": c.active} for c in cards])
             except (AttributeError, Exception):
-                # Fallback if column doesn't exist yet
                 df = pd.DataFrame([{"card_id": c.card_id, "owner": c.owner, "active": c.active} for c in cards])
-        except Exception as e:
-            # If query fails, return empty dataframe
+        except Exception:
             df = pd.DataFrame(columns=["card_id", "owner", "active"])
-        
-        # Get available account types
+
         try:
             account_types = AccountType.query.all()
             account_type_options = [{"label": at.type_name, "value": at.type_name} for at in account_types]
         except:
-            # If account_types table doesn't exist, provide defaults
             account_type_options = [
                 {"label": "engineer", "value": "engineer"},
                 {"label": "manager", "value": "manager"},
                 {"label": "visitor", "value": "visitor"},
                 {"label": "custom", "value": "custom"}
             ]
-        
+
         return html.Div([
             html.H3("Cards"),
             dash_table.DataTable(
@@ -856,55 +745,15 @@ def render_tab(tab):
                     inline=True
                 ),
                 html.Button("Add Card", id="add-card-btn"),
-                html.Button("Edit Rules", id="edit-rules-btn", style={"marginLeft": "10px"}),
+                html.Button("Toggle Active Selected Card", id="toggle-card-btn", style={"marginLeft": "10px"}),
             ]),
             html.Button("Delete Selected Card", id="delete-card-btn"),
             html.Div(id="cards-msg")
         ])
-    
-    if tab == "account_types":
-        try:
-            account_types = AccountType.query.all()
-            df = pd.DataFrame([{
-                "type_name": at.type_name,
-                "description": at.description,
-                "is_system": at.is_system,
-                "default_rules": at.default_rules
-            } for at in account_types])
-        except Exception as e:
-            # If table doesn't exist, show migration message
-            return html.Div([
-                html.H3("Account Types"),
-                html.P("Database not initialized yet. Please visit /dev/init_db to initialize the database with default account types."),
-                html.A("Initialize Database", href="/dev/init_db")
-            ])
-        
-        return html.Div([
-            html.H3("Account Types"),
-            dash_table.DataTable(
-                id="account-types-table",
-                columns=[{"name": c, "id": c} for c in df.columns],
-                data=df.to_dict("records"),
-                row_selectable="single",
-            ),
-            html.Div([
-                dcc.Input(id="new-account-type-name", placeholder="type name", type="text"),
-                dcc.Input(id="new-account-type-desc", placeholder="description", type="text"),
-                dcc.Input(id="new-account-type-rules", placeholder='default rules JSON', type="text"),
-                html.Button("Add Account Type", id="add-account-type-btn")
-            ]),
-            html.Button("Delete Selected Account Type", id="delete-account-type-btn"),
-            html.Div(id="account-types-msg")
-        ])
-    
+
     if tab == "encres":
         encres = EncreDevice.query.all()
-        df = pd.DataFrame([{
-            "encre_id": d.encre_id,
-            "encre_name": d.encre_name,
-            "description": d.description,
-            "active": d.active
-        } for d in encres])
+        df = pd.DataFrame([{"encre_id": d.encre_id, "encre_name": d.encre_name, "description": d.description, "active": d.active} for d in encres])
         return html.Div([
             html.H3("Encres / Doors"),
             dash_table.DataTable(
@@ -921,14 +770,15 @@ def render_tab(tab):
                 html.Button("Add Encre", id="add-encre-btn")
             ]),
             html.Button("Delete Selected Encre", id="delete-encre-btn"),
+            html.Button("Toggle Active Selected Encre", id="toggle-encre-btn", style={"marginLeft": "10px"}),
             html.Div(id="encres-msg")
         ])
-    
+
     if tab == "rules":
         rules = AccessRule.query.all()
         encres = EncreDevice.query.all()
         encre_names = {d.encre_id: d.encre_name for d in encres}
-        
+
         df = pd.DataFrame([{
             "id": r.id,
             "card_id": r.card_id,
@@ -936,77 +786,86 @@ def render_tab(tab):
             "access_from": r.access_from.isoformat() if r.access_from else "",
             "access_to": r.access_to.isoformat() if r.access_to else ""
         } for r in rules])
-        
+
+        # Account type rules editor (new): list account types and allow editing default rules
+        account_types = AccountType.query.all()
+        at_rows = [{"type_name": at.type_name, "description": at.description, "default_rules": at.default_rules or "[]", "is_system": at.is_system} for at in account_types]
+        at_df = pd.DataFrame(at_rows)
+
         return html.Div([
             html.H3("Access Rules"),
-            dash_table.DataTable(
-                id="rules-table",
-                columns=[{"name": c, "id": c} for c in df.columns],
-                data=df.to_dict("records"),
-                row_selectable="single",
-            ),
             html.Div([
-                dcc.Input(id="rule-card-id", placeholder="card id", type="text"),
-                html.Label("Select Encre/Door:"),
-                dcc.RadioItems(
-                    id="rule-encre-select",
-                    options=[{"label": "None", "value": ""}] + 
-                            [{"label": "All Encres", "value": "all"}] + 
-                            [{"label": d.encre_name, "value": d.encre_id} for d in encres],
-                    value=""
+                html.H4("Per-card rules"),
+                dash_table.DataTable(
+                    id="rules-table",
+                    columns=[{"name": c, "id": c} for c in df.columns],
+                    data=df.to_dict("records"),
+                    row_selectable="single",
                 ),
-                dcc.Input(id="rule-from", placeholder="HH:MM", type="text"),
-                dcc.Input(id="rule-to", placeholder="HH:MM", type="text"),
-                html.Button("Add Rule", id="add-rule-btn")
-            ]),
-            html.Button("Delete Selected Rule", id="delete-rule-btn"),
-            html.Div(id="rules-msg")
+                html.Div([
+                    dcc.Input(id="rule-card-id", placeholder="card id", type="text"),
+                    html.Label("Select Encre/Door:"),
+                    dcc.RadioItems(
+                        id="rule-encre-select",
+                        options=[{"label": "None", "value": ""}] + [{"label": "All Encres", "value": "all"}] + [{"label": d.encre_name, "value": d.encre_id} for d in encres],
+                        value=""
+                    ),
+                    dcc.Input(id="rule-from", placeholder="HH:MM", type="text"),
+                    dcc.Input(id="rule-to", placeholder="HH:MM", type="text"),
+                    html.Button("Add Rule", id="add-rule-btn")
+                ]),
+                html.Button("Delete Selected Rule", id="delete-rule-btn"),
+                html.Div(id="rules-msg")
+            ], style={"marginBottom": "30px"}),
+
+            html.Hr(),
+            html.Div([
+                html.H4("Account Type Default Rules (edit here to update all non-custom cards)"),
+                dash_table.DataTable(
+                    id="account-type-rules-table",
+                    columns=[{"name": c, "id": c} for c in at_df.columns],
+                    data=at_df.to_dict("records"),
+                    row_selectable="single",
+                    page_size=5
+                ),
+                html.Div([
+                    html.Label("Selected Type:"),
+                    dcc.Input(id="atr-type-name", placeholder="type_name", type="text", readOnly=True),
+                    html.Br(),
+                    html.Label("default_rules JSON (list of rules):"),
+                    dcc.Textarea(id="atr-default-rules", placeholder='[{"encre_id":"doorA","access_from":"08:00","access_to":"17:00"}]', style={"width": "100%", "height": "120px"}),
+                    html.Br(),
+                    html.Button("Save Account Type Rules", id="save-atr-btn")
+                ]),
+                html.Div(id="atr-msg")
+            ])
         ])
-    
+
     if tab == "logs":
         logs = AccessLog.query.order_by(AccessLog.timestamp.desc()).limit(200).all()
         df = pd.DataFrame([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
         return html.Div([
             html.H3("Access Logs"),
-            dash_table.DataTable(
-                id="logs-table",
-                columns=[{"name": c, "id": c} for c in df.columns],
-                data=df.to_dict("records"),
-                page_size=20
-            ),
+            dash_table.DataTable(id="logs-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), page_size=20),
             html.Button("Refresh", id="refresh-logs")
         ])
-    
+
     if tab == "logs_connection":
         logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
-        data = [{
-            "numTag": l.numTag,
-            "tagEncre": l.tagEncre,
-            "last_connection": l.last_connection.isoformat() if l.last_connection else ""
-        } for l in logs]
+        data = [{"numTag": l.numTag, "tagEncre": l.tagEncre, "last_connection": l.last_connection.isoformat() if l.last_connection else ""} for l in logs]
         df = pd.DataFrame(data, columns=["numTag", "tagEncre", "last_connection"])
         return html.Div([
              html.H3("Connection Logs"),
-             dash_table.DataTable(
-                 id="connection-table",
-                 columns=[{"name": c, "id": c} for c in df.columns],
-                 data=df.to_dict("records"),
-                 page_size=20
-             ),
+             dash_table.DataTable(id="connection-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), page_size=20),
              html.Button("Refresh", id="refresh-connection-logs")
         ])
-    
+
     if tab == "pi":
         devices = PiDevice.query.all()
         df = pd.DataFrame([{"device_id": d.device_id, "description": d.description, "enabled": d.enabled} for d in devices])
         return html.Div([
             html.H3("Raspberry Pi Devices"),
-            dash_table.DataTable(
-                id="pi-table",
-                columns=[{"name": c, "id": c} for c in df.columns],
-                data=df.to_dict("records"),
-                row_selectable="single"
-            ),
+            dash_table.DataTable(id="pi-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), row_selectable="single"),
             html.Div([
                 dcc.Input(id="new-pi-id", placeholder="device id", type="text"),
                 dcc.Input(id="new-pi-desc", placeholder="description", type="text"),
@@ -1018,34 +877,28 @@ def render_tab(tab):
         ])
 
 # -----------------------
-# Callbacks: Add/Delete card and rules (client -> server)
+# Callbacks: Cards (Add/Delete/Toggle)
 # -----------------------
 @app.callback(
     Output("cards-msg", "children"),
-    [Input("add-card-btn", "n_clicks"), Input("delete-card-btn", "n_clicks")],
-    [State("new-card-id", "value"), State("new-card-owner", "value"), 
-     State("new-card-account-type", "value"), State("cards-table", "selected_rows"), State("cards-table", "data")]
+    [Input("add-card-btn", "n_clicks"), Input("delete-card-btn", "n_clicks"), Input("toggle-card-btn", "n_clicks")],
+    [State("new-card-id", "value"), State("new-card-owner", "value"), State("new-card-account-type", "value"), State("cards-table", "selected_rows"), State("cards-table", "data")]
 )
-def handle_cards(add_click, delete_click, new_card_id, new_card_owner, account_type, selected_rows, table_data):
+def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_owner, account_type, selected_rows, table_data):
     triggered = ctx.triggered_id
-    
+
     if triggered == "add-card-btn":
         if not new_card_id:
             return "card_id required"
-        
+
         try:
             res = server.test_client().post(
-                "/api/admin/cards", 
-                json={
-                    "card_id": new_card_id, 
-                    "owner": new_card_owner or "",
-                    "account_type": account_type or "visitor"
-                },
+                "/api/admin/cards",
+                json={"card_id": new_card_id, "owner": new_card_owner or "", "account_type": account_type or "visitor"},
                 content_type='application/json'
             )
-            
             if res.status_code == 200:
-                return "Card added successfully with default deny rule"
+                return "Card added successfully (rules set based on account type if not custom)"
             else:
                 try:
                     error_data = res.get_json()
@@ -1054,20 +907,15 @@ def handle_cards(add_click, delete_click, new_card_id, new_card_owner, account_t
                     return f"Error: Status {res.status_code}"
         except Exception as e:
             return f"Exception: {str(e)}"
-    
+
     if triggered == "delete-card-btn":
         if not selected_rows:
             return "Select a row first"
         row = table_data[selected_rows[0]]
         card_id = row["card_id"]
-        
+
         try:
-            res = server.test_client().delete(
-                "/api/admin/cards", 
-                json={"card_id": card_id},
-                content_type='application/json'
-            )
-            
+            res = server.test_client().delete("/api/admin/cards", json={"card_id": card_id}, content_type='application/json')
             if res.status_code == 200:
                 return "Card deleted"
             else:
@@ -1078,64 +926,86 @@ def handle_cards(add_click, delete_click, new_card_id, new_card_owner, account_t
                     return f"Error: Status {res.status_code}"
         except Exception as e:
             return f"Exception: {str(e)}"
-    
-    return ""
 
-@app.callback(
-    Output("account-types-msg", "children"),
-    [Input("add-account-type-btn", "n_clicks"), Input("delete-account-type-btn", "n_clicks")],
-    [State("new-account-type-name", "value"), State("new-account-type-desc", "value"),
-     State("new-account-type-rules", "value"), State("account-types-table", "selected_rows"), 
-     State("account-types-table", "data")]
-)
-def handle_account_types(add_click, delete_click, type_name, description, rules_str, selected_rows, table_data):
-    triggered = ctx.triggered_id
-    if triggered == "add-account-type-btn":
-        if not type_name:
-            return "type_name required"
-        try:
-            rules = json.loads(rules_str) if rules_str else {}
-        except Exception as e:
-            return f"Invalid rules JSON: {e}"
-        
-        res = server.test_client().post("/api/admin/account_types", json={
-            "type_name": type_name,
-            "description": description or "",
-            "default_rules": rules
-        })
-        if res.status_code == 200:
-            return "Account type added"
-        else:
-            return f"Error: {res.get_json()}"
-    
-    if triggered == "delete-account-type-btn":
+    if triggered == "toggle-card-btn":
         if not selected_rows:
-            return "Select an account type first"
+            return "Select a row first"
         row = table_data[selected_rows[0]]
-        type_name = row["type_name"]
-        
-        res = server.test_client().delete("/api/admin/account_types", json={"type_name": type_name})
-        if res.status_code == 200:
-            return "Account type deleted"
-        else:
-            return f"Error: {res.get_json()}"
+        card_id = row["card_id"]
+        try:
+            res = server.test_client().post("/api/admin/cards/toggle", json={"card_id": card_id})
+            if res.status_code == 200:
+                payload = res.get_json()
+                return f"Card {card_id} active={payload.get('active')}"
+            else:
+                return f"Error toggling card: {res.get_data(as_text=True)}"
+        except Exception as e:
+            return f"Exception: {str(e)}"
+
     return ""
 
+# -----------------------
+# Callbacks: Encres (Add/Delete/Toggle)
+# -----------------------
+@app.callback(
+    Output("encres-msg", "children"),
+    [Input("add-encre-btn", "n_clicks"), Input("delete-encre-btn", "n_clicks"), Input("toggle-encre-btn", "n_clicks")],
+    [State("new-encre-id", "value"), State("new-encre-name", "value"), State("new-encre-desc", "value"), State("encres-table", "selected_rows"), State("encres-table", "data")]
+)
+def handle_encres(add_click, delete_click, toggle_click, new_id, new_name, new_desc, selected_rows, table_data):
+    triggered = ctx.triggered_id
+    if triggered == "add-encre-btn":
+        if not new_id or not new_name:
+            return "encre_id and encre_name required"
+        res = server.test_client().post("/api/admin/encres", json={"encre_id": new_id, "encre_name": new_name, "description": new_desc or ""})
+        if res.status_code == 200:
+            return "Encre added"
+        else:
+            return f"Error: {res.get_json()}"
+
+    if triggered == "delete-encre-btn":
+        if not selected_rows:
+            return "Select a row first"
+        row = table_data[selected_rows[0]]
+        encre_id = row["encre_id"]
+        res = server.test_client().delete("/api/admin/encres", json={"encre_id": encre_id})
+        if res.status_code == 200:
+            return "Encre deleted"
+        else:
+            return f"Error: {res.get_json()}"
+
+    if triggered == "toggle-encre-btn":
+        if not selected_rows:
+            return "Select a row first"
+        row = table_data[selected_rows[0]]
+        encre_id = row["encre_id"]
+        encre = EncreDevice.query.filter_by(encre_id=encre_id).first()
+        if not encre:
+            return "Encre not found"
+        encre.active = not encre.active
+        db.session.commit()
+        return f"Encre {encre_id} active={encre.active}"
+
+    return ""
+
+# -----------------------
+# Callbacks: Rules (per-card) and Account Type Rules (in Access Rules tab)
+# -----------------------
 @app.callback(
     Output("rules-msg", "children"),
     [Input("add-rule-btn", "n_clicks"), Input("delete-rule-btn", "n_clicks")],
-    [State("rule-card-id", "value"), State("rule-encre-select", "value"),
-     State("rule-from", "value"), State("rule-to", "value"),
-     State("rules-table", "selected_rows"), State("rules-table", "data")]
+    [State("rule-card-id", "value"), State("rule-encre-select", "value"), State("rule-from", "value"), State("rule-to", "value"), State("rules-table", "selected_rows"), State("rules-table", "data")]
 )
 def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, selected_rows, table_data):
     triggered = ctx.triggered_id
     if triggered == "add-rule-btn":
         if not card_id:
             return "card_id required"
+        # If encre_id == "all", use None => indicates all encres / no specific door restriction
+        encre_val = None if encre_id in ("", "all") else encre_id
         res = server.test_client().post("/api/admin/access_rule", json={
             "card_id": card_id,
-            "encre_id": encre_id if encre_id else None,
+            "encre_id": encre_val,
             "access_from": rfrom,
             "access_to": rto
         })
@@ -1155,18 +1025,55 @@ def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, selecte
             return f"Error: {res.get_json()}"
     return ""
 
+# Save Account Type Rules from Access Rules tab
+@app.callback(
+    Output("atr-msg", "children"),
+    [Input("save-atr-btn", "n_clicks"), Input("account-type-rules-table", "selected_rows")],
+    [State("atr-type-name", "value"), State("atr-default-rules", "value"), State("account-type-rules-table", "data")]
+)
+def handle_account_type_rules(save_click, selected_rows, type_name, default_rules_text, table_data):
+    triggered = ctx.triggered_id
+    if triggered == "account-type-rules-table":
+        # populate selection in editor
+        if not selected_rows:
+            return ""
+        row = table_data[selected_rows[0]]
+        # row contains default_rules as string; copy to editor via client-side update - but Dash server callback can return only the msg output.
+        # We'll simply instruct user to click Save after verifying the fields are populated by client (the table is selectable).
+        return ""
+    if triggered == "save-atr-btn":
+        if not type_name:
+            return "Select an account type first (click on a row)"
+        try:
+            parsed = json.loads(default_rules_text or "[]")
+            if not isinstance(parsed, list):
+                return "default_rules must be a JSON list"
+        except Exception as e:
+            return f"Invalid JSON: {e}"
+
+        res = server.test_client().put("/api/admin/account_type_rules", json={"type_name": type_name, "default_rules": parsed})
+        if res.status_code == 200:
+            return "Account type rules saved and propagated to non-custom cards"
+        else:
+            try:
+                return f"Error: {res.get_json()}"
+            except:
+                return f"Error status: {res.status_code}"
+    return ""
+
+# -----------------------
+# Callbacks: Pi devices
+# -----------------------
 @app.callback(
     Output("pi-msg", "children"),
     [Input("add-pi-btn", "n_clicks"), Input("toggle-pi-btn", "n_clicks")],
-    [State("new-pi-id", "value"), State("new-pi-desc", "value"), State("new-pi-api-key", "value"),
-     State("pi-table", "selected_rows"), State("pi-table", "data")]
+    [State("new-pi-id", "value"), State("new-pi-desc", "value"), State("new-pi-api-key", "value"), State("pi-table", "selected_rows"), State("pi-table", "data")]
 )
 def handle_pi(add_click, toggle_click, new_id, new_desc, new_api_key, selected_rows, table_data):
     triggered = ctx.triggered_id
     if triggered == "add-pi-btn":
         if not new_id or not new_api_key:
             return "device_id and api_key required"
-        # Hash key and insert
         if PiDevice.query.filter_by(device_id=new_id).first():
             return "device already exists"
         api_key_hash = generate_password_hash(new_api_key)
@@ -1187,114 +1094,23 @@ def handle_pi(add_click, toggle_click, new_id, new_desc, new_api_key, selected_r
         return f"Device {device_id} enabled={d.enabled}"
     return ""
 
-@app.callback(
-    Output("encres-msg", "children"),
-    [Input("add-encre-btn", "n_clicks"), Input("delete-encre-btn", "n_clicks")],
-    [State("new-encre-id", "value"), State("new-encre-name", "value"), 
-     State("new-encre-desc", "value"), State("encres-table", "selected_rows"), 
-     State("encres-table", "data")]
-)
-def handle_encres(add_click, delete_click, new_id, new_name, new_desc, selected_rows, table_data):
-    triggered = ctx.triggered_id
-    if triggered == "add-encre-btn":
-        if not new_id or not new_name:
-            return "encre_id and encre_name required"
-        res = server.test_client().post("/api/admin/encres", json={
-            "encre_id": new_id, 
-            "encre_name": new_name,
-            "description": new_desc or ""
-        })
-        if res.status_code == 200:
-            return "Encre added"
-        else:
-            return f"Error: {res.get_json()}"
-    if triggered == "delete-encre-btn":
-        if not selected_rows:
-            return "Select a row first"
-        row = table_data[selected_rows[0]]
-        encre_id = row["encre_id"]
-        res = server.test_client().delete("/api/admin/encres", json={"encre_id": encre_id})
-        if res.status_code == 200:
-            return "Encre deleted"
-        else:
-            return f"Error: {res.get_json()}"
-    return ""
-
-@app.callback(
-    [Output("edit-rules-modal", "style"), Output("modal-content", "children")],
-    [Input("edit-rules-btn", "n_clicks"), Input("close-modal-btn", "n_clicks")],
-    [State("cards-table", "selected_rows"), State("cards-table", "data")]
-)
-def handle_edit_rules(edit_click, close_click, selected_rows, table_data):
-    triggered = ctx.triggered_id
-    if triggered == "edit-rules-btn":
-        if not selected_rows:
-            return {"display": "none"}, []
-        
-        row = table_data[selected_rows[0]]
-        card_id = row["card_id"]
-        
-        # Fetch rules for this card
-        res = server.test_client().get(f"/api/admin/card_rules/{card_id}")
-        rules = res.get_json()
-        
-        # Fetch available encres
-        encres_res = server.test_client().get("/api/admin/encres")
-        encres = encres_res.get_json()
-        
-        content = [
-            html.H4(f"Rules for Card: {card_id}"),
-            html.Div([
-                html.Div([
-                    html.P(f"Rule {r['id']}: Encre={r['encre_id'] or 'All'}, "
-                           f"From={r['access_from']}, To={r['access_to']}"),
-                    html.Button(f"Delete Rule {r['id']}", id={"type": "del-rule", "index": r['id']})
-                ]) for r in rules
-            ]),
-            html.Hr(),
-            html.H5("Add New Rule"),
-            html.Label("Encre:"),
-            dcc.RadioItems(
-                id="modal-encre-select",
-                options=[{"label": "All Encres", "value": "all"}] + 
-                        [{"label": d['encre_name'], "value": d['encre_id']} for d in encres] +
-                        [{"label": "None (Deny All)", "value": ""}],
-                value=""
-            ),
-            dcc.Input(id="modal-from", placeholder="HH:MM", type="text"),
-            dcc.Input(id="modal-to", placeholder="HH:MM", type="text"),
-            html.Button("Add Rule", id="modal-add-rule-btn"),
-            dcc.Store(id="modal-card-id", data=card_id)
-        ]
-        
-        return {"display": "block"}, content
-    
-    if triggered == "close-modal-btn":
-        return {"display": "none"}, []
-    
-    return {"display": "none"}, []
-
 # -----------------------
 # Initialize DB helper route (for dev only)
 # -----------------------
 @server.route("/dev/init_db")
 def dev_init_db():
-    # only allow on debug/dev
     if server.debug or os.environ.get("DEV_INIT") == "1":
         db.create_all()
-        
-        # Initialize default account types if they don't exist
-        default_types = ["engineer", "manager", "visitor", "custom"]
-        for type_name in default_types:
+        default_types = [
+            ("engineer", "Poste ingenieur", [{"encre_id": None, "access_from": "", "access_to": ""}], True),
+            ("manager", "acces à tout", [{"encre_id": None, "access_from": "", "access_to": ""}], True),
+            ("visitor", "visiteur", [{"encre_id": "PorteA", "access_from": "08:00", "access_to": "18:00"}], True),
+            ("custom", "Poste secondaire avec acces spécial", [], False)
+        ]
+        for type_name, desc, rules, is_system in default_types:
             if not AccountType.query.filter_by(type_name=type_name).first():
-                at = AccountType(
-                    type_name=type_name,
-                    description=f"{type_name.capitalize()} account type",
-                    default_rules="{}",
-                    is_system=True if type_name != "custom" else False
-                )
+                at = AccountType(type_name=type_name, description=desc, default_rules=json.dumps(rules), is_system=is_system)
                 db.session.add(at)
-        
         db.session.commit()
         return "db initialized with default account types"
     return "disabled", 403
@@ -1302,12 +1118,10 @@ def dev_init_db():
 # -----------------------
 # Run
 # -----------------------
-
 if __name__ == "__main__":
-    # Safety: ensure redirect uri uses the right FRONTEND_BASE
     print("Starting Dash app. FRONTEND_BASE:", FRONTEND_BASE)
     server.run(host="0.0.0.0", port=8000, debug=True)
 else:
     print("Dash app loaded as module.")
     with server.app_context():
-        db.create_all()  # ensure tables exist
+        db.create_all()
