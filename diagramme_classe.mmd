@@ -1,0 +1,128 @@
+classDiagram
+    class User {
+        +int id
+        +string oid
+        +string email
+        +string name
+        +bool is_admin
+    }
+
+    class Card {
+        +int id
+        +string card_id
+        +string owner
+        +string account_type
+        +bool active
+    }
+
+    class AccessRule {
+        +int id
+        +string card_id
+        +string account_type
+        +string encre_id
+        +time access_from
+        +time access_to
+    }
+
+    class AccessLog {
+        +int id
+        +string card_id
+        +datetime timestamp
+        +string result
+        +text reason
+    }
+
+    class ConnectionLog {
+        +int id
+        +string numTag
+        +string tagEncre
+        +datetime last_connection
+        +string result
+    }
+
+    class PiDevice {
+        +int id
+        +string device_id
+        +string api_key_hash
+        +string description
+        +bool enabled
+    }
+
+    class EncreDevice {
+        +int id
+        +string encre_id
+        +string encre_name
+        +text description
+        +bool active
+    }
+
+    %% relationships
+    AccessRule "0..*" --> "0..1" Card : card_id (FK)
+    AccessRule "0..*" --> "0..1" EncreDevice : encre_id (FK)
+    AccessLog "0..*" --> "0..1" Card : card_id
+    Card "1" -- "0..*" AccessRule : has per-card rules
+    EncreDevice "1" -- "0..*" AccessRule : referenced by rules
+```classDiagram
+    class User {
+        +int id
+        +string oid
+        +string email
+        +string name
+        +bool is_admin
+    }
+
+    class Card {
+        +int id
+        +string card_id
+        +string owner
+        +string account_type
+        +bool active
+    }
+
+    class AccessRule {
+        +int id
+        +string card_id
+        +string account_type
+        +string encre_id
+        +time access_from
+        +time access_to
+    }
+
+    class AccessLog {
+        +int id
+        +string card_id
+        +datetime timestamp
+        +string result
+        +text reason
+    }
+
+    class ConnectionLog {
+        +int id
+        +string numTag
+        +string tagEncre
+        +datetime last_connection
+        +string result
+    }
+
+    class PiDevice {
+        +int id
+        +string device_id
+        +string api_key_hash
+        +string description
+        +bool enabled
+    }
+
+    class EncreDevice {
+        +int id
+        +string encre_id
+        +string encre_name
+        +text description
+        +bool active
+    }
+
+    %% relationships
+    AccessRule "0..*" --> "0..1" Card : card_id (FK)
+    AccessRule "0..*" --> "0..1" EncreDevice : encre_id (FK)
+    AccessLog "0..*" --> "0..1" Card : card_id
+    Card "1" -- "0..*" AccessRule : has per-card rules
+    EncreDevice "1" -- "0..*" AccessRule : referenced by rules

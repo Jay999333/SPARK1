@@ -1,0 +1,41 @@
+sequenceDiagram
+    actor Admin
+    participant Browser
+    participant Dash as "Dash UI (browser)"
+    participant Server as "Flask/Dash Server"
+    participant DB as "MySQL / SQLAlchemy"
+    participant Pi as "Raspberry Pi Device"
+
+    %% --- Admin updates account type default rules ---
+    Admin->>Browser: edit account type rules & Save
+    Browser->>Dash: UI save action
+    Dash->>Server: PUT /api/admin/account_type_rules { type_name, default_rules }
+    Server->>DB: DELETE AccessRule WHERE card_id IS NULL AND account_type=type_name
+    Server->>DB: INSERT AccessRule (card_id=NULL, account_type=type_name, ...)
+    Server->>DB: SELECT Card WHERE account_type=type_name (except "custom")
+    loop per card
+        Server->>DB: DELETE AccessRule WHERE card_id = card.card_id
+        Server->>DB: INSERT AccessRule (card_id=card.card_id, ...)
+    end
+    DB-->>Server: commit
+    Server-->>Dash: 200 OK
+    Dash-->>Browser: show success
+
+    %% --- Pi device obtains token then checks access ---
+    Pi->>Server: POST /api/pi/validate { device_id, api_key }
+    Server->>DB: SELECT PiDevice WHERE device_id AND enabled
+    DB-->>Server: device row
+    Server->>Server: verify api_key (check_password_hash)
+    Server-->>Pi: JWT token (expires_at)
+    Pi->>Server: POST /api/pi/check_access Authorization: Bearer <JWT>, { card_id }
+    Server->>Server: jwt.decode -> request.device_id
+    Server->>DB: SELECT Card WHERE card_id AND active = true
+    alt card not found or inactive
+        Server->>DB: INSERT AccessLog (denied, reason)
+        Server-->>Pi: {"granted": false, ...}
+    else card found
+        Server->>DB: SELECT AccessRule WHERE card_id = card_id
+        Server-->>Server: evaluate rules (time ranges / all)
+        Server->>DB: INSERT AccessLog (granted|denied, reason)
+        Server-->>Pi: {"granted": true|false, "reason": "..."}
+    end

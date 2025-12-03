@@ -160,12 +160,17 @@ def _build_auth_url(scopes=None, state=None):
 # -----------------------
 # Flask Routes - Login
 # -----------------------
+# Login route
+# -----------------------
 @server.route("/login")
 def login():
     session.clear()
     auth_url = _build_auth_url(scopes=SCOPE, state=None)
     return redirect(auth_url)
 
+# Callback route
+# -----------------------
+# Handles response from Azure and gets token
 @server.route(REDIRECT_PATH)
 def authorized():
     code = request.args.get("code")
@@ -202,6 +207,8 @@ def authorized():
 
     return redirect("/")
 
+# Logout route
+# -----------------------
 @server.route("/logout")
 def logout():
     session.clear()
@@ -231,7 +238,10 @@ def require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if DISABLE_AUTH:
-            session.setdefault("user", {"oid": "dev-admin", "email": "admin@example.com", "name": "Dev Admin"})
+            session.setdefault("user", {"oid": "dev-admin", 
+                                        "email": "admin@example.com", 
+                                        "name": "Dev Admin"
+                                        })
             usr = session.get("user")
             db_user = User.query.filter_by(oid=usr.get("oid")).first()
             if not db_user:
@@ -419,7 +429,8 @@ def admin_cards():
                 else:
                     # copy the defaults to specific card rows
                     for dr in defaults:
-                        newr = AccessRule(card_id=card_id, account_type=None, encre_id=dr.encre_id, access_from=dr.access_from, access_to=dr.access_to)
+                        newr = AccessRule(card_id=card_id, account_type=None, encre_id=dr.encre_id, 
+                                          access_from=dr.access_from, access_to=dr.access_to)
                         db.session.add(newr)
                     db.session.commit()
 
@@ -483,7 +494,8 @@ def admin_account_type_rules():
             out.append({
                 "type_name": type_name,
                 "default_rules": [
-                    {"encre_id": r.encre_id, "access_from": r.access_from.isoformat() if r.access_from else "", "access_to": r.access_to.isoformat() if r.access_to else ""} for r in rules
+                    {"encre_id": r.encre_id, "access_from": r.access_from.isoformat() if r.access_from else "",
+                      "access_to": r.access_to.isoformat() if r.access_to else ""} for r in rules
                 ]
             })
         return jsonify(out)
@@ -507,7 +519,8 @@ def admin_account_type_rules():
                 atime = rr.get("access_to")
                 af_time = datetime.datetime.strptime(af, "%H:%M:%S").time() if af else None
                 at_time = datetime.datetime.strptime(atime, "%H:%M:%S").time() if atime else None
-                newr = AccessRule(card_id=None, account_type=type_name, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
+                newr = AccessRule(card_id=None, account_type=type_name, encre_id=encre_id if encre_id else None, 
+                                  access_from=af_time, access_to=at_time)
                 db.session.add(newr)
             db.session.commit()
         except Exception as e:
@@ -527,7 +540,8 @@ def admin_account_type_rules():
                         atime = rr.get("access_to")
                         af_time = datetime.datetime.strptime(af, "%H:%M:%S").time() if af else None
                         at_time = datetime.datetime.strptime(atime, "%H:%M:%S").time() if atime else None
-                        newr = AccessRule(card_id=c.card_id, account_type=None, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
+                        newr = AccessRule(card_id=c.card_id, account_type=None, encre_id=encre_id if encre_id else None, 
+                                          access_from=af_time, access_to=at_time)
                         db.session.add(newr)
                     db.session.commit()
                 except Exception:
@@ -596,7 +610,8 @@ def admin_logs():
     if card_id:
         query = query.filter_by(card_id=card_id)
     logs = query.order_by(AccessLog.timestamp.desc()).limit(limit).all()
-    return jsonify([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
+    return jsonify([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, 
+                     "reason": l.reason} for l in logs])
 
 @server.route("/api/admin/logs_connection", methods=["GET"])
 @require_admin
@@ -610,7 +625,8 @@ def admin_logs_connection():
 def admin_encres():
     if request.method == "GET":
         encres = EncreDevice.query.all()
-        return jsonify([{"encre_id": d.encre_id, "encre_name": d.encre_name, "description": d.description, "active": d.active} for d in encres])
+        return jsonify([{"encre_id": d.encre_id, "encre_name": d.encre_name, "description": d.description, 
+                         "active": d.active} for d in encres])
 
     if request.method == "POST":
         data = request.json or {}
@@ -710,7 +726,8 @@ def render_tab(tab):
             cards = Card.query.all()
             try:
                 _ = cards[0].account_type if cards else None
-                df = pd.DataFrame([{"card_id": c.card_id, "owner": c.owner, "account_type": c.account_type or "visitor", "active": c.active} for c in cards])
+                df = pd.DataFrame([{"card_id": c.card_id, "owner": c.owner, "account_type": c.account_type or "visitor", 
+                                    "active": c.active} for c in cards])
             except (AttributeError, Exception):
                 df = pd.DataFrame([{"card_id": c.card_id, "owner": c.owner, "active": c.active} for c in cards])
         except Exception:
@@ -758,7 +775,8 @@ def render_tab(tab):
 
     if tab == "encres":
         encres = EncreDevice.query.all()
-        df = pd.DataFrame([{"encre_id": d.encre_id, "encre_name": d.encre_name, "description": d.description, "active": d.active} for d in encres])
+        df = pd.DataFrame([{"encre_id": d.encre_id, "encre_name": d.encre_name, "description": d.description, 
+                            "active": d.active} for d in encres])
         return html.Div([
             html.H3("Encres / Doors"),
             dash_table.DataTable(
@@ -803,7 +821,8 @@ def render_tab(tab):
             if type_name:
                 drs = AccessRule.query.filter_by(card_id=None, account_type=type_name).all()
                 for r in drs:
-                    default_rules.append({"encre_id": r.encre_id, "access_from": r.access_from.isoformat() if r.access_from else "", "access_to": r.access_to.isoformat() if r.access_to else ""})
+                    default_rules.append({"encre_id": r.encre_id, "access_from": r.access_from.isoformat() if r.access_from else "", 
+                                          "access_to": r.access_to.isoformat() if r.access_to else ""})
             at_rows.append({"type_name": type_name, "default_rules": json.dumps(default_rules)})
         at_df = pd.DataFrame(at_rows)
 
@@ -822,7 +841,8 @@ def render_tab(tab):
                     html.Label("Select Encre/Door:"),
                     dcc.RadioItems(
                         id="rule-encre-select",
-                        options=[{"label": "None", "value": ""}] + [{"label": "All Encres", "value": "all"}] + [{"label": d.encre_name, "value": d.encre_id} for d in encres],
+                        options=[{"label": "None", "value": ""}] + [{"label": "All Encres", "value": "all"}] + 
+                                [{"label": d.encre_name, "value": d.encre_id} for d in encres],
                         value=""
                     ),
                     dcc.Input(id="rule-from", placeholder="HH:MM", type="text"),
@@ -866,7 +886,8 @@ def render_tab(tab):
                         html.Label("Select Encre/Door:"),
                         dcc.RadioItems(
                             id="atr-encre-select",
-                            options=[{"label": "None", "value": ""}] + [{"label": "All Encres", "value": "all"}] + [{"label": d.encre_name, "value": d.encre_id} for d in encres],
+                            options=[{"label": "None", "value": ""}] + [{"label": "All Encres", "value": "all"}] + 
+                                    [{"label": d.encre_name, "value": d.encre_id} for d in encres],
                             value=""
                         ),
                         dcc.Input(id="atr-from", placeholder="HH:MM", type="text"),
@@ -883,10 +904,12 @@ def render_tab(tab):
 
     if tab == "logs":
         logs = AccessLog.query.order_by(AccessLog.timestamp.desc()).limit(200).all()
-        df = pd.DataFrame([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, "reason": l.reason} for l in logs])
+        df = pd.DataFrame([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, 
+                            "reason": l.reason} for l in logs])
         return html.Div([
             html.H3("Access Logs"),
-            dash_table.DataTable(id="logs-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), page_size=20),
+            dash_table.DataTable(id="logs-table", columns=[{"name": c, "id": c} for c in df.columns], 
+                                 data=df.to_dict("records"), page_size=20),
             html.Button("Refresh", id="refresh-logs")
         ])
 
@@ -897,7 +920,8 @@ def render_tab(tab):
         df = pd.DataFrame(data, columns=["numTag", "tagEncre", "last_connection", "result"])
         return html.Div([
              html.H3("Connection Logs"),
-             dash_table.DataTable(id="connection-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), page_size=20),
+             dash_table.DataTable(id="connection-table", columns=[{"name": c, "id": c} for c in df.columns], 
+                                  data=df.to_dict("records"), page_size=20),
              html.Button("Refresh", id="refresh-connection-logs")
         ])
 
@@ -906,7 +930,8 @@ def render_tab(tab):
         df = pd.DataFrame([{"device_id": d.device_id, "description": d.description, "enabled": d.enabled} for d in devices])
         return html.Div([
             html.H3("Raspberry Pi Devices"),
-            dash_table.DataTable(id="pi-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), row_selectable="single"),
+            dash_table.DataTable(id="pi-table", columns=[{"name": c, "id": c} for c in df.columns], 
+                                 data=df.to_dict("records"), row_selectable="single"),
             html.Div([
                 dcc.Input(id="new-pi-id", placeholder="device id", type="text"),
                 dcc.Input(id="new-pi-desc", placeholder="description", type="text"),
@@ -1230,7 +1255,8 @@ def dev_init_db():
                 for rr in rules:
                     af_time = datetime.datetime.strptime(rr.get("access_from"), "%H:%M").time() if rr.get("access_from") else None
                     at_time = datetime.datetime.strptime(rr.get("access_to"), "%H:%M").time() if rr.get("access_to") else None
-                    ar = AccessRule(card_id=None, account_type=type_name, encre_id=rr.get("encre_id"), access_from=af_time, access_to=at_time)
+                    ar = AccessRule(card_id=None, account_type=type_name, encre_id=rr.get("encre_id"), 
+                                    access_from=af_time, access_to=at_time)
                     db.session.add(ar)
         db.session.commit()
         return "db initialized with default account types"
