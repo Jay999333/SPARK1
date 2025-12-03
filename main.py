@@ -505,8 +505,8 @@ def admin_account_type_rules():
                 encre_id = rr.get("encre_id")
                 af = rr.get("access_from")
                 atime = rr.get("access_to")
-                af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
-                at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
+                af_time = datetime.datetime.strptime(af, "%H:%M:%S").time() if af else None
+                at_time = datetime.datetime.strptime(atime, "%H:%M:%S").time() if atime else None
                 newr = AccessRule(card_id=None, account_type=type_name, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
                 db.session.add(newr)
             db.session.commit()
@@ -525,8 +525,8 @@ def admin_account_type_rules():
                         encre_id = rr.get("encre_id")
                         af = rr.get("access_from")
                         atime = rr.get("access_to")
-                        af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
-                        at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
+                        af_time = datetime.datetime.strptime(af, "%H:%M:%S").time() if af else None
+                        at_time = datetime.datetime.strptime(atime, "%H:%M:%S").time() if atime else None
                         newr = AccessRule(card_id=c.card_id, account_type=None, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
                         db.session.add(newr)
                     db.session.commit()
@@ -1156,9 +1156,9 @@ def handle_account_type_rules(selected_type_rows, add_click, delete_click, save_
             # check times
             try:
                 if af_val:
-                    datetime.datetime.strptime(af_val, "%H:%M")
+                    datetime.datetime.strptime(af_val, "%H:%M:%S")
                 if at_val:
-                    datetime.datetime.strptime(at_val, "%H:%M")
+                    datetime.datetime.strptime(at_val, "%H:%M:%S")
             except Exception as e:
                 return type_name, table_data, f"Invalid time format in row: {e}"
             payload_rules.append({"encre_id": encre_id, "access_from": af_val, "access_to": at_val})
@@ -1174,86 +1174,6 @@ def handle_account_type_rules(selected_type_rows, add_click, delete_click, save_
     
     # Default/initial state (no trigger or initial load)
     return type_name or "", table_data or [], ""
-
-# Save Account Type Rules from Access Rules tab
-# @app.callback(
-#     [Output("atr-type-name", "value"), Output("atr-default-table", "data")],
-#     [Input("account-types-table", "selected_rows")],
-#     [State("account-types-table", "data")]
-# )
-# def on_select_account_type(selected_rows, types_data):
-#     if not selected_rows:
-#         return "", []
-#     row = types_data[selected_rows[0]]
-#     type_name = row.get("type_name")
-#     # load default rules from DB
-#     rules = AccessRule.query.filter_by(card_id=None, account_type=type_name).all()
-#     data = [{"encre_id": r.encre_id or "", "access_from": r.access_from.isoformat() if r.access_from else ""
-#              , "access_to": r.access_to.isoformat() if r.access_to else ""} for r in rules]
-#     return type_name, data
-
-# @app.callback(
-#     [Output("atr-default-table", "data"), Output("atr-msg", "children")],
-#     [Input("atr-add-rule-btn", "n_clicks"), Input("atr-delete-rule-btn", "n_clicks")],
-#     [State("atr-type-name", "value"), State("atr-encre-select", "value"), State("atr-from", "value"), 
-#      State("atr-to", "value"), State("atr-default-table", "selected_rows"), State("atr-default-table", "data")]
-# )
-# def add_delete_atr_rule(add_click, delete_click, type_name, encre_val, af, at, sel_rows, table_data):
-#     triggered = ctx.triggered_id
-#     if triggered == "atr-add-rule-btn":
-#         if not type_name:
-#             return table_data, "Select an account type first"
-#         # append to local table data
-#         encre = None if encre_val in ("", "all") else encre_val
-#         new_row = {"encre_id": encre or "", "access_from": af or "", "access_to": at or ""}
-#         table_data = table_data or []
-#         table_data.append(new_row)
-#         return table_data, "Added default rule (unsaved)"
-#     if triggered == "atr-delete-rule-btn":
-#         if not sel_rows:
-#             return table_data, "Select a default rule row to delete"
-#         idx = sel_rows[0]
-#         if table_data and 0 <= idx < len(table_data):
-#             del table_data[idx]
-#             return table_data, "Removed default rule (unsaved)"
-#         return table_data, "Index out of range"
-#     return table_data, ""
-
-# @app.callback(
-#     Output("atr-msg", "children"),
-#     [Input("save-atr-btn", "n_clicks")],
-#     [State("atr-type-name", "value"), State("atr-default-table", "data")]
-# )
-# def save_atr_rules(n_clicks, type_name, rules_table_data):
-#     if not ctx.triggered:
-#         return ""
-#     if not type_name:
-#         return "Select an account type first"
-#     # validate rules_table_data list
-#     rules_table_data = rules_table_data or []
-#     # convert from table_data to API format [ {"encre_id":..., "access_from":"HH:MM", "access_to":"HH:MM"} ]
-#     payload_rules = []
-#     for r in rules_table_data:
-#         encre_id = r.get("encre_id") or None
-#         af = r.get("access_from") or ""
-#         at = r.get("access_to") or ""
-#         # check times
-#         try:
-#             if af:
-#                 datetime.datetime.strptime(af, "%H:%M")
-#             if at:
-#                 datetime.datetime.strptime(at, "%H:%M")
-#         except Exception as e:
-#             return f"Invalid time format in row: {e}"
-#         payload_rules.append({"encre_id": encre_id, "access_from": af, "access_to": at})
-#     # PUT to backend
-#     res = server.test_client().put("/api/admin/account_type_rules", json={"type_name": type_name, "default_rules": payload_rules})
-#     if res.status_code == 200:
-#         return "Account type default rules saved and propagated"
-#     try:
-#         return f"Error: {res.get_json()}"
-#     except:
-#         return f"Error status: {res.status_code}"
 
 # -----------------------
 # Callbacks: Pi devices
