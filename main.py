@@ -87,27 +87,23 @@ class User(db.Model):
     name = db.Column(db.String(256))
     is_admin = db.Column(db.BOOLEAN, default=False)
 
-class AccountType(db.Model):
-    __tablename__ = "account_types"
-    id = db.Column(db.Integer, primary_key=True)
-    type_name = db.Column(db.String(128), unique=True, nullable=False)
-    description = db.Column(db.Text)
-    # JSON: list of rule objects [{"encre_id": "...", "access_from": "HH:MM", "access_to": "HH:MM"}, ...]
-    default_rules = db.Column(db.Text)
-    is_system = db.Column(db.Boolean, default=False)
+# Account types are stored as default "access_rules" rows with card_id = NULL and account_type = '<type_name>'
+# AccountType model removed; default rules are represented by AccessRule rows with card_id == None.
 
 class Card(db.Model):
     __tablename__ = "cards"
     id = db.Column(db.Integer, primary_key=True)
     card_id = db.Column(db.String(128), unique=True, nullable=False)
     owner = db.Column(db.String(256))
-    account_type = db.Column(db.String(128), db.ForeignKey("account_types.type_name"), default="visitor")
+    account_type = db.Column(db.String(128), nullable=True)
     active = db.Column(db.Boolean, default=True)
 
 class AccessRule(db.Model):
     __tablename__ = "access_rules"
     id = db.Column(db.Integer, primary_key=True)
-    card_id = db.Column(db.String(128), db.ForeignKey("cards.card_id"), nullable=False)
+    # cards rules: card_id non-null. Default account-type rules: card_id is NULL and account_type is set
+    card_id = db.Column(db.String(128), db.ForeignKey("cards.card_id"), nullable=True)
+    account_type = db.Column(db.String(128), nullable=True)
     encre_id = db.Column(db.String(128), db.ForeignKey("encre_devices.encre_id"), nullable=True)
     access_from = db.Column(db.Time, nullable=True)
     access_to = db.Column(db.Time, nullable=True)
@@ -126,6 +122,7 @@ class ConnectionLog(db.Model):
     numTag = db.Column(db.String(128))
     tagEncre = db.Column(db.String(20))
     last_connection = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    result = db.Column(db.String(20))
 
 class PiDevice(db.Model):
     __tablename__ = "pi_devices"
@@ -407,31 +404,25 @@ def admin_cards():
             db.session.add(c)
             db.session.flush()
 
-            # default deny rule
-            default_rule = AccessRule(card_id=card_id, encre_id=None, access_from=None, access_to=None)
-            db.session.add(default_rule)
-            db.session.commit()
+            # default deny rule if custom: keep explicit deny rule
+            if account_type == "custom":
+                default_rule = AccessRule(card_id=card_id, encre_id=None, access_from=None, access_to=None)
+                db.session.add(default_rule)
+                db.session.commit()
+            else:
+                # populate the new card's rules from default account-type rules stored in access_rules (card_id == NULL)
+                defaults = AccessRule.query.filter_by(card_id=None, account_type=account_type).all()
+                if not defaults:
+                    # keep a deny rule if no defaults exist
+                    db.session.add(AccessRule(card_id=card_id, encre_id=None, access_from=None, access_to=None))
+                    db.session.commit()
+                else:
+                    # copy the defaults to specific card rows
+                    for dr in defaults:
+                        newr = AccessRule(card_id=card_id, account_type=None, encre_id=dr.encre_id, access_from=dr.access_from, access_to=dr.access_to)
+                        db.session.add(newr)
+                    db.session.commit()
 
-            # If account_type != custom -> replace rules with account_type default rules (inherit)
-            if account_type and account_type != "custom":
-                at = AccountType.query.filter_by(type_name=account_type).first()
-                if at and at.default_rules:
-                    try:
-                        rules = json.loads(at.default_rules)
-                        # delete existing rules for card
-                        AccessRule.query.filter_by(card_id=card_id).delete()
-                        for rr in rules:
-                            encre_id = rr.get("encre_id")
-                            af = rr.get("access_from")
-                            atime = rr.get("access_to")
-                            af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
-                            at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
-                            newr = AccessRule(card_id=card_id, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
-                            db.session.add(newr)
-                        db.session.commit()
-                    except Exception:
-                        # ignore malformed default_rules and leave default deny
-                        db.session.rollback()
             return jsonify({"ok": True})
 
         except Exception as e:
@@ -476,21 +467,24 @@ def admin_cards_toggle():
 @require_admin
 def admin_account_type_rules():
     """
-    GET => list available account types (type_name, description, default_rules, is_system)
-    PUT => update default_rules for a given type_name:
-        payload: { "type_name": "engineer", "default_rules": [ {..}, ... ] }
+    GET => list available account types (type_name, default_rules)
+    PUT => replace default rules for a given type_name:
+        payload: { "type_name": "engineer", "default_rules": [ {"encre_id":"...", "access_from":"HH:MM", "access_to":"HH:MM"} ] }
     When updating default_rules, propagate to all cards with that account_type (except 'custom'):
         replace their rules with the default_rules
     """
     if request.method == "GET":
-        ats = AccountType.query.all()
+        # distinct account types derived from access_rules where card_id is NULL
+        types = db.session.query(AccessRule.account_type).filter(AccessRule.card_id == None).distinct().all()
         out = []
-        for at in ats:
+        for t in types:
+            type_name = t[0]
+            rules = AccessRule.query.filter_by(card_id=None, account_type=type_name).all()
             out.append({
-                "type_name": at.type_name,
-                "description": at.description,
-                "default_rules": json.loads(at.default_rules) if at.default_rules else [],
-                "is_system": at.is_system
+                "type_name": type_name,
+                "default_rules": [
+                    {"encre_id": r.encre_id, "access_from": r.access_from.isoformat() if r.access_from else "", "access_to": r.access_to.isoformat() if r.access_to else ""} for r in rules
+                ]
             })
         return jsonify(out)
 
@@ -500,35 +494,40 @@ def admin_account_type_rules():
         new_rules = data.get("default_rules")
         if not type_name:
             return jsonify({"error": "type_name required"}), 400
-        at = AccountType.query.filter_by(type_name=type_name).first()
-        if not at:
-            return jsonify({"error": "not_found"}), 404
-
-        # Validate rules is a list
         if not isinstance(new_rules, list):
             return jsonify({"error": "default_rules must be a list"}), 400
 
         try:
-            at.default_rules = json.dumps(new_rules)
+            # remove existing default rules for account type
+            AccessRule.query.filter_by(card_id=None, account_type=type_name).delete()
+            # insert the new default rules as AccessRule rows with card_id == None
+            for rr in new_rules:
+                encre_id = rr.get("encre_id")
+                af = rr.get("access_from")
+                atime = rr.get("access_to")
+                af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
+                at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
+                newr = AccessRule(card_id=None, account_type=type_name, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
+                db.session.add(newr)
             db.session.commit()
         except Exception as e:
             db.session.rollback()
             return jsonify({"error": str(e)}), 500
 
-        # Propagate to cards of this account type (except custom)
+        # propagate to cards of this account type (except custom)
         if type_name != "custom":
             cards = Card.query.filter_by(account_type=type_name).all()
             for c in cards:
                 try:
-                    # replace rules for card
                     AccessRule.query.filter_by(card_id=c.card_id).delete()
+                    # copy inserted default rules (those just created)
                     for rr in new_rules:
                         encre_id = rr.get("encre_id")
                         af = rr.get("access_from")
                         atime = rr.get("access_to")
                         af_time = datetime.datetime.strptime(af, "%H:%M").time() if af else None
                         at_time = datetime.datetime.strptime(atime, "%H:%M").time() if atime else None
-                        newr = AccessRule(card_id=c.card_id, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
+                        newr = AccessRule(card_id=c.card_id, account_type=None, encre_id=encre_id if encre_id else None, access_from=af_time, access_to=at_time)
                         db.session.add(newr)
                     db.session.commit()
                 except Exception:
@@ -603,7 +602,8 @@ def admin_logs():
 @require_admin
 def admin_logs_connection():
     logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
-    return jsonify([{"numTag": log.numTag, "tagEncre": log.tagEncre, "last_connection": log.last_connection.isoformat()} for log in logs])
+    return jsonify([{"numTag": log.numTag, "tagEncre": log.tagEncre, "last_connection": log.last_connection.isoformat(), 
+                     "result": log.result} for log in logs])
 
 @server.route("/api/admin/encres", methods=["GET", "POST", "PUT", "DELETE"])
 @require_admin
@@ -657,6 +657,7 @@ def get_card_rules(card_id):
     return jsonify([{
         "id": r.id,
         "card_id": r.card_id,
+        "account_type": r.account_type,
         "encre_id": r.encre_id,
         "access_from": r.access_from.isoformat() if r.access_from else "",
         "access_to": r.access_to.isoformat() if r.access_to else ""
@@ -716,8 +717,12 @@ def render_tab(tab):
             df = pd.DataFrame(columns=["card_id", "owner", "active"])
 
         try:
-            account_types = AccountType.query.all()
-            account_type_options = [{"label": at.type_name, "value": at.type_name} for at in account_types]
+            # derive account types from default access_rules (card_id = NULL)
+            types = db.session.query(AccessRule.account_type).filter(AccessRule.card_id == None).distinct().all()
+            account_type_options = [{"label": t[0], "value": t[0]} for t in types if t and t[0]]
+            # ensure 'custom' option is present
+            if not any(o['value'] == 'custom' for o in account_type_options):
+                account_type_options.append({"label": "custom", "value": "custom"})
         except:
             account_type_options = [
                 {"label": "engineer", "value": "engineer"},
@@ -782,14 +787,24 @@ def render_tab(tab):
         df = pd.DataFrame([{
             "id": r.id,
             "card_id": r.card_id,
+            "account_type": r.account_type or "",
             "encre": encre_names.get(r.encre_id, r.encre_id or "All"),
             "access_from": r.access_from.isoformat() if r.access_from else "",
             "access_to": r.access_to.isoformat() if r.access_to else ""
         } for r in rules])
 
         # Account type rules editor (new): list account types and allow editing default rules
-        account_types = AccountType.query.all()
-        at_rows = [{"type_name": at.type_name, "description": at.description, "default_rules": at.default_rules or "[]", "is_system": at.is_system} for at in account_types]
+        # fetch distinct default account types from access_rules where card_id is NULL
+        types = db.session.query(AccessRule.account_type).filter(AccessRule.card_id == None).distinct().all()
+        at_rows = []
+        for t in types:
+            type_name = t[0]
+            default_rules = []
+            if type_name:
+                drs = AccessRule.query.filter_by(card_id=None, account_type=type_name).all()
+                for r in drs:
+                    default_rules.append({"encre_id": r.encre_id, "access_from": r.access_from.isoformat() if r.access_from else "", "access_to": r.access_to.isoformat() if r.access_to else ""})
+            at_rows.append({"type_name": type_name, "default_rules": json.dumps(default_rules)})
         at_df = pd.DataFrame(at_rows)
 
         return html.Div([
@@ -821,23 +836,48 @@ def render_tab(tab):
             html.Hr(),
             html.Div([
                 html.H4("Account Type Default Rules (edit here to update all non-custom cards)"),
-                dash_table.DataTable(
-                    id="account-type-rules-table",
-                    columns=[{"name": c, "id": c} for c in at_df.columns],
-                    data=at_df.to_dict("records"),
-                    row_selectable="single",
-                    page_size=5
-                ),
                 html.Div([
-                    html.Label("Selected Type:"),
-                    dcc.Input(id="atr-type-name", placeholder="type_name", type="text", readOnly=True),
-                    html.Br(),
-                    html.Label("default_rules JSON (list of rules):"),
-                    dcc.Textarea(id="atr-default-rules", placeholder='[{"encre_id":"doorA","access_from":"08:00","access_to":"17:00"}]', style={"width": "100%", "height": "120px"}),
-                    html.Br(),
-                    html.Button("Save Account Type Rules", id="save-atr-btn")
-                ]),
-                html.Div(id="atr-msg")
+                    html.Label("Account Types:"),
+                    dash_table.DataTable(
+                        id="account-types-table",
+                        columns=[{"name": "type_name", "id": "type_name"}],
+                        data=at_df[["type_name"]].to_dict("records") if not at_df.empty else [],
+                        row_selectable="single",
+                        page_size=10
+                    )
+                ], style={"width": "32%", "display": "inline-block", "verticalAlign": "top", "marginRight": "20px"}),
+                html.Div([
+                    html.Label("Default Rules for selected type:"),
+                    dash_table.DataTable(
+                        id="atr-default-table",
+                        columns=[
+                            {"name": "encre_id", "id": "encre_id"},
+                            {"name": "access_from", "id": "access_from"},
+                            {"name": "access_to", "id": "access_to"}
+                        ],
+                        data=[],
+                        row_selectable="single",
+                        page_size=10
+                    ),
+                    html.Div([
+                        html.Label("Selected Type:"),
+                        dcc.Input(id="atr-type-name", placeholder="type_name", type="text", readOnly=True),
+                        html.Br(),
+                        html.Label("Select Encre/Door:"),
+                        dcc.RadioItems(
+                            id="atr-encre-select",
+                            options=[{"label": "None", "value": ""}] + [{"label": "All Encres", "value": "all"}] + [{"label": d.encre_name, "value": d.encre_id} for d in encres],
+                            value=""
+                        ),
+                        dcc.Input(id="atr-from", placeholder="HH:MM", type="text"),
+                        dcc.Input(id="atr-to", placeholder="HH:MM", type="text"),
+                        html.Button("Add Default Rule", id="atr-add-rule-btn", style={"marginTop": "8px"}),
+                        html.Button("Delete Selected Default Rule", id="atr-delete-rule-btn", style={"marginLeft": "8px"}),
+                        html.Br(),
+                        html.Button("Save Account Type Rules", id="save-atr-btn", style={"marginTop": "8px"}),
+                        html.Div(id="atr-msg")
+                    ], style={"marginTop": "8px"})
+                ], style={"width": "60%", "display": "inline-block", "verticalAlign": "top"})
             ])
         ])
 
@@ -852,8 +892,9 @@ def render_tab(tab):
 
     if tab == "logs_connection":
         logs = ConnectionLog.query.order_by(ConnectionLog.last_connection.desc()).all()
-        data = [{"numTag": l.numTag, "tagEncre": l.tagEncre, "last_connection": l.last_connection.isoformat() if l.last_connection else ""} for l in logs]
-        df = pd.DataFrame(data, columns=["numTag", "tagEncre", "last_connection"])
+        data = [{"numTag": l.numTag, "tagEncre": l.tagEncre, "last_connection": l.last_connection.isoformat(),
+                  "result": l.result if l.last_connection else ""} for l in logs]
+        df = pd.DataFrame(data, columns=["numTag", "tagEncre", "last_connection", "result"])
         return html.Div([
              html.H3("Connection Logs"),
              dash_table.DataTable(id="connection-table", columns=[{"name": c, "id": c} for c in df.columns], data=df.to_dict("records"), page_size=20),
@@ -882,7 +923,8 @@ def render_tab(tab):
 @app.callback(
     Output("cards-msg", "children"),
     [Input("add-card-btn", "n_clicks"), Input("delete-card-btn", "n_clicks"), Input("toggle-card-btn", "n_clicks")],
-    [State("new-card-id", "value"), State("new-card-owner", "value"), State("new-card-account-type", "value"), State("cards-table", "selected_rows"), State("cards-table", "data")]
+    [State("new-card-id", "value"), State("new-card-owner", "value"), State("new-card-account-type", "value"), 
+     State("cards-table", "selected_rows"), State("cards-table", "data")]
 )
 def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_owner, account_type, selected_rows, table_data):
     triggered = ctx.triggered_id
@@ -890,6 +932,24 @@ def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_ow
     if triggered == "add-card-btn":
         if not new_card_id:
             return "card_id required"
+
+        # Ensure account type is selected and not empty
+        if not account_type:
+            return "account_type required"
+
+        # if not custom, make sure the account type exists and has default rules saved
+        if account_type != "custom":
+            types_resp = server.test_client().get("/api/admin/account_type_rules")
+            try:
+                types_json = types_resp.get_json()
+                matching = [t for t in types_json if t.get("type_name") == account_type]
+                if not matching:
+                    return "Selected account type is not defined (save a default in Account Type section first)"
+                # if we want to require non-empty default rules
+                if not matching[0].get("default_rules"):
+                    return "Selected account type has no default rules defined; please add at least one default rule"
+            except Exception:
+                return "Error fetching account type list"
 
         try:
             res = server.test_client().post(
@@ -950,7 +1010,8 @@ def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_ow
 @app.callback(
     Output("encres-msg", "children"),
     [Input("add-encre-btn", "n_clicks"), Input("delete-encre-btn", "n_clicks"), Input("toggle-encre-btn", "n_clicks")],
-    [State("new-encre-id", "value"), State("new-encre-name", "value"), State("new-encre-desc", "value"), State("encres-table", "selected_rows"), State("encres-table", "data")]
+    [State("new-encre-id", "value"), State("new-encre-name", "value"), State("new-encre-desc", "value"), 
+     State("encres-table", "selected_rows"), State("encres-table", "data")]
 )
 def handle_encres(add_click, delete_click, toggle_click, new_id, new_name, new_desc, selected_rows, table_data):
     triggered = ctx.triggered_id
@@ -994,7 +1055,8 @@ def handle_encres(add_click, delete_click, toggle_click, new_id, new_name, new_d
 @app.callback(
     Output("rules-msg", "children"),
     [Input("add-rule-btn", "n_clicks"), Input("delete-rule-btn", "n_clicks")],
-    [State("rule-card-id", "value"), State("rule-encre-select", "value"), State("rule-from", "value"), State("rule-to", "value"), State("rules-table", "selected_rows"), State("rules-table", "data")]
+    [State("rule-card-id", "value"), State("rule-encre-select", "value"), State("rule-from", "value"), 
+     State("rule-to", "value"), State("rules-table", "selected_rows"), State("rules-table", "data")]
 )
 def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, selected_rows, table_data):
     triggered = ctx.triggered_id
@@ -1025,41 +1087,173 @@ def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, selecte
             return f"Error: {res.get_json()}"
     return ""
 
-# Save Account Type Rules from Access Rules tab
 @app.callback(
-    Output("atr-msg", "children"),
-    [Input("save-atr-btn", "n_clicks"), Input("account-type-rules-table", "selected_rows")],
-    [State("atr-type-name", "value"), State("atr-default-rules", "value"), State("account-type-rules-table", "data")]
+    [Output("atr-type-name", "value"), 
+     Output("atr-default-table", "data"), 
+     Output("atr-msg", "children")],
+    [Input("account-types-table", "selected_rows"),
+     Input("atr-add-rule-btn", "n_clicks"), 
+     Input("atr-delete-rule-btn", "n_clicks"),
+     Input("save-atr-btn", "n_clicks")],
+    [State("account-types-table", "data"),
+     State("atr-type-name", "value"), 
+     State("atr-encre-select", "value"), 
+     State("atr-from", "value"), 
+     State("atr-to", "value"), 
+     State("atr-default-table", "selected_rows"), 
+     State("atr-default-table", "data")]
 )
-def handle_account_type_rules(save_click, selected_rows, type_name, default_rules_text, table_data):
+def handle_account_type_rules(selected_type_rows, add_click, delete_click, save_click,
+                               types_data, type_name, encre_val, af, at, sel_rows, table_data):
     triggered = ctx.triggered_id
-    if triggered == "account-type-rules-table":
-        # populate selection in editor
-        if not selected_rows:
-            return ""
-        row = table_data[selected_rows[0]]
-        # row contains default_rules as string; copy to editor via client-side update - but Dash server callback can return only the msg output.
-        # We'll simply instruct user to click Save after verifying the fields are populated by client (the table is selectable).
-        return ""
+    
+    # When selecting an account type from the list
+    if triggered == "account-types-table":
+        if not selected_type_rows:
+            return "", [], ""
+        row = types_data[selected_type_rows[0]]
+        type_name = row.get("type_name")
+        # load default rules from DB
+        rules = AccessRule.query.filter_by(card_id=None, account_type=type_name).all()
+        data = [{"encre_id": r.encre_id or "", 
+                 "access_from": r.access_from.isoformat() if r.access_from else "",
+                 "access_to": r.access_to.isoformat() if r.access_to else ""} for r in rules]
+        return type_name, data, ""
+    
+    # Add a default rule
+    if triggered == "atr-add-rule-btn":
+        if not type_name:
+            return type_name or "", table_data or [], "Select an account type first"
+        # append to local table data
+        encre = None if encre_val in ("", "all") else encre_val
+        new_row = {"encre_id": encre or "", "access_from": af or "", "access_to": at or ""}
+        table_data = table_data or []
+        table_data.append(new_row)
+        return type_name, table_data, "Added default rule (unsaved)"
+    
+    # Delete a default rule
+    if triggered == "atr-delete-rule-btn":
+        if not sel_rows:
+            return type_name or "", table_data or [], "Select a default rule row to delete"
+        idx = sel_rows[0]
+        if table_data and 0 <= idx < len(table_data):
+            del table_data[idx]
+            return type_name, table_data, "Removed default rule (unsaved)"
+        return type_name or "", table_data or [], "Index out of range"
+    
+    # Save account type rules
     if triggered == "save-atr-btn":
         if not type_name:
-            return "Select an account type first (click on a row)"
-        try:
-            parsed = json.loads(default_rules_text or "[]")
-            if not isinstance(parsed, list):
-                return "default_rules must be a JSON list"
-        except Exception as e:
-            return f"Invalid JSON: {e}"
-
-        res = server.test_client().put("/api/admin/account_type_rules", json={"type_name": type_name, "default_rules": parsed})
-        if res.status_code == 200:
-            return "Account type rules saved and propagated to non-custom cards"
-        else:
+            return type_name or "", table_data or [], "Select an account type first"
+        # validate rules_table_data list
+        rules_table_data = table_data or []
+        # convert from table_data to API format
+        payload_rules = []
+        for r in rules_table_data:
+            encre_id = r.get("encre_id") or None
+            af_val = r.get("access_from") or ""
+            at_val = r.get("access_to") or ""
+            # check times
             try:
-                return f"Error: {res.get_json()}"
-            except:
-                return f"Error status: {res.status_code}"
-    return ""
+                if af_val:
+                    datetime.datetime.strptime(af_val, "%H:%M")
+                if at_val:
+                    datetime.datetime.strptime(at_val, "%H:%M")
+            except Exception as e:
+                return type_name, table_data, f"Invalid time format in row: {e}"
+            payload_rules.append({"encre_id": encre_id, "access_from": af_val, "access_to": at_val})
+        # PUT to backend
+        res = server.test_client().put("/api/admin/account_type_rules", 
+                                       json={"type_name": type_name, "default_rules": payload_rules})
+        if res.status_code == 200:
+            return type_name, table_data, "Account type default rules saved and propagated"
+        try:
+            return type_name, table_data, f"Error: {res.get_json()}"
+        except:
+            return type_name, table_data, f"Error status: {res.status_code}"
+    
+    # Default/initial state (no trigger or initial load)
+    return type_name or "", table_data or [], ""
+
+# Save Account Type Rules from Access Rules tab
+# @app.callback(
+#     [Output("atr-type-name", "value"), Output("atr-default-table", "data")],
+#     [Input("account-types-table", "selected_rows")],
+#     [State("account-types-table", "data")]
+# )
+# def on_select_account_type(selected_rows, types_data):
+#     if not selected_rows:
+#         return "", []
+#     row = types_data[selected_rows[0]]
+#     type_name = row.get("type_name")
+#     # load default rules from DB
+#     rules = AccessRule.query.filter_by(card_id=None, account_type=type_name).all()
+#     data = [{"encre_id": r.encre_id or "", "access_from": r.access_from.isoformat() if r.access_from else ""
+#              , "access_to": r.access_to.isoformat() if r.access_to else ""} for r in rules]
+#     return type_name, data
+
+# @app.callback(
+#     [Output("atr-default-table", "data"), Output("atr-msg", "children")],
+#     [Input("atr-add-rule-btn", "n_clicks"), Input("atr-delete-rule-btn", "n_clicks")],
+#     [State("atr-type-name", "value"), State("atr-encre-select", "value"), State("atr-from", "value"), 
+#      State("atr-to", "value"), State("atr-default-table", "selected_rows"), State("atr-default-table", "data")]
+# )
+# def add_delete_atr_rule(add_click, delete_click, type_name, encre_val, af, at, sel_rows, table_data):
+#     triggered = ctx.triggered_id
+#     if triggered == "atr-add-rule-btn":
+#         if not type_name:
+#             return table_data, "Select an account type first"
+#         # append to local table data
+#         encre = None if encre_val in ("", "all") else encre_val
+#         new_row = {"encre_id": encre or "", "access_from": af or "", "access_to": at or ""}
+#         table_data = table_data or []
+#         table_data.append(new_row)
+#         return table_data, "Added default rule (unsaved)"
+#     if triggered == "atr-delete-rule-btn":
+#         if not sel_rows:
+#             return table_data, "Select a default rule row to delete"
+#         idx = sel_rows[0]
+#         if table_data and 0 <= idx < len(table_data):
+#             del table_data[idx]
+#             return table_data, "Removed default rule (unsaved)"
+#         return table_data, "Index out of range"
+#     return table_data, ""
+
+# @app.callback(
+#     Output("atr-msg", "children"),
+#     [Input("save-atr-btn", "n_clicks")],
+#     [State("atr-type-name", "value"), State("atr-default-table", "data")]
+# )
+# def save_atr_rules(n_clicks, type_name, rules_table_data):
+#     if not ctx.triggered:
+#         return ""
+#     if not type_name:
+#         return "Select an account type first"
+#     # validate rules_table_data list
+#     rules_table_data = rules_table_data or []
+#     # convert from table_data to API format [ {"encre_id":..., "access_from":"HH:MM", "access_to":"HH:MM"} ]
+#     payload_rules = []
+#     for r in rules_table_data:
+#         encre_id = r.get("encre_id") or None
+#         af = r.get("access_from") or ""
+#         at = r.get("access_to") or ""
+#         # check times
+#         try:
+#             if af:
+#                 datetime.datetime.strptime(af, "%H:%M")
+#             if at:
+#                 datetime.datetime.strptime(at, "%H:%M")
+#         except Exception as e:
+#             return f"Invalid time format in row: {e}"
+#         payload_rules.append({"encre_id": encre_id, "access_from": af, "access_to": at})
+#     # PUT to backend
+#     res = server.test_client().put("/api/admin/account_type_rules", json={"type_name": type_name, "default_rules": payload_rules})
+#     if res.status_code == 200:
+#         return "Account type default rules saved and propagated"
+#     try:
+#         return f"Error: {res.get_json()}"
+#     except:
+#         return f"Error status: {res.status_code}"
 
 # -----------------------
 # Callbacks: Pi devices
@@ -1067,7 +1261,8 @@ def handle_account_type_rules(save_click, selected_rows, type_name, default_rule
 @app.callback(
     Output("pi-msg", "children"),
     [Input("add-pi-btn", "n_clicks"), Input("toggle-pi-btn", "n_clicks")],
-    [State("new-pi-id", "value"), State("new-pi-desc", "value"), State("new-pi-api-key", "value"), State("pi-table", "selected_rows"), State("pi-table", "data")]
+    [State("new-pi-id", "value"), State("new-pi-desc", "value"), State("new-pi-api-key", "value"), 
+     State("pi-table", "selected_rows"), State("pi-table", "data")]
 )
 def handle_pi(add_click, toggle_click, new_id, new_desc, new_api_key, selected_rows, table_data):
     triggered = ctx.triggered_id
@@ -1101,20 +1296,25 @@ def handle_pi(add_click, toggle_click, new_id, new_desc, new_api_key, selected_r
 def dev_init_db():
     if server.debug or os.environ.get("DEV_INIT") == "1":
         db.create_all()
-        default_types = [
-            ("engineer", "Poste ingenieur", [{"encre_id": None, "access_from": "", "access_to": ""}], True),
-            ("manager", "acces à tout", [{"encre_id": None, "access_from": "", "access_to": ""}], True),
-            ("visitor", "visiteur", [{"encre_id": "PorteA", "access_from": "08:00", "access_to": "18:00"}], True),
-            ("custom", "Poste secondaire avec acces spécial", [], False)
-        ]
-        for type_name, desc, rules, is_system in default_types:
-            if not AccountType.query.filter_by(type_name=type_name).first():
-                at = AccountType(type_name=type_name, description=desc, default_rules=json.dumps(rules), is_system=is_system)
-                db.session.add(at)
+        # create default account-type rules as AccessRule rows with card_id=None and account_type=<type_name>
+        default_types = {
+            "engineer": [{"encre_id": None, "access_from": "06:00", "access_to": "21:00"}],
+            "manager": [{"encre_id": None, "access_from": "07:00", "access_to": "18:00"}],
+            "visitor": [{"encre_id": None, "access_from": "08:00", "access_to": "18:00"}],
+            "custom": []  # custom has no defaults
+        }
+        for type_name, rules in default_types.items():
+            # if no default rules recorded yet, insert them
+            existing = AccessRule.query.filter_by(card_id=None, account_type=type_name).first()
+            if not existing and rules:
+                for rr in rules:
+                    af_time = datetime.datetime.strptime(rr.get("access_from"), "%H:%M").time() if rr.get("access_from") else None
+                    at_time = datetime.datetime.strptime(rr.get("access_to"), "%H:%M").time() if rr.get("access_to") else None
+                    ar = AccessRule(card_id=None, account_type=type_name, encre_id=rr.get("encre_id"), access_from=af_time, access_to=at_time)
+                    db.session.add(ar)
         db.session.commit()
         return "db initialized with default account types"
     return "disabled", 403
-
 # -----------------------
 # Run
 # -----------------------
