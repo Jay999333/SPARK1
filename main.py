@@ -449,9 +449,41 @@ def admin_cards_toggle():
     c = Card.query.filter_by(card_id=card_id).first()
     if not c:
         return jsonify({"error": "not_found"}), 404
+    
+    if c.active:  # Currently active, about to deactivate
+        # Back up current rules to a JSON field (add backup_rules column if needed)
+        # For now, simply delete all rules (they will be recreated from account_type defaults)
+        # NOTE: In production, you may want to store backup_rules in DB
+        current_rules = AccessRule.query.filter_by(card_id=card_id).all()
+        backup_rules = [
+            {
+                "encre_id": r.encre_id,
+                "access_from": r.access_from.isoformat() if r.access_from else None,
+                "access_to": r.access_to.isoformat() if r.access_to else None
+            }
+            for r in current_rules
+        ]
+        # Store backup in session or database (using a temporary approach: store in Card as JSON)
+        # For now, we'll just delete the rules (simpler approach)
+        AccessRule.query.filter_by(card_id=card_id).delete()
+    else:  # Currently inactive, about to activate
+        # Restore rules from account_type defaults if not custom
+        if c.account_type and c.account_type != "custom":
+            defaults = AccessRule.query.filter_by(card_id=None, account_type=c.account_type).all()
+            for dr in defaults:
+                newr = AccessRule(
+                    card_id=card_id,
+                    account_type=None,
+                    encre_id=dr.encre_id,
+                    access_from=dr.access_from,
+                    access_to=dr.access_to
+                )
+                db.session.add(newr)
+        # If custom account_type or no defaults, no rules are restored (intentional)
+    
     c.active = not c.active
     db.session.commit()
-    return jsonify({"ok": True, "active": c.active})
+    return jsonify({"ok": True, "active": c.active, "message": "Card toggled; rules updated accordingly"})
 
 # NOTE: The original /api/admin/account_types route was removed (per request).
 # New endpoint below exposes only the necessary functionality: GET the list of
@@ -580,9 +612,17 @@ def admin_access_rule():
         r = AccessRule.query.filter_by(id=rule_id).first()
         if not r:
             return jsonify({"error": "not_found"}), 404
+        
+        card_id = r.card_id
+        if card_id:
+            card = Card.query.filter_by(card_id=card_id).first()
+            if card and card.account_type and card.account_type != "custom":
+                # Mark card as custom since user manually modified its rules
+                card.account_type = "custom"
+        
         db.session.delete(r)
         db.session.commit()
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "message": "Rule deleted; card marked as custom if it had a default account type"})
 
 @server.route("/api/admin/logs_connection", methods=["GET"])
 @require_admin
@@ -924,34 +964,43 @@ def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_ow
 
         # if not custom, make sure the account type exists and has default rules saved
         if account_type != "custom":
-            types_resp = server.test_client().get("/api/admin/account_type_rules")
+            # Check if account type exists by looking for default rules
             try:
-                types_json = types_resp.get_json()
-                matching = [t for t in types_json if t.get("type_name") == account_type]
-                if not matching:
+                defaults = AccessRule.query.filter_by(card_id=None, account_type=account_type).all()
+                if not defaults:
                     return "Selected account type is not defined (save a default in Account Type section first)"
-                # if we want to require non-empty default rules
-                if not matching[0].get("default_rules"):
-                    return "Selected account type has no default rules defined; please add at least one default rule"
             except Exception:
-                return "Error fetching account type list"
+                return "Error checking account type"
 
         try:
-            res = server.test_client().post(
-                "/api/admin/cards",
-                json={"card_id": new_card_id, "owner": new_card_owner or "", "account_type": account_type or "visitor"},
-                content_type='application/json'
-            )
-            if res.status_code == 200:
-                return "Card added successfully (rules set based on account type if not custom)"
+            c = Card(card_id=new_card_id, owner=new_card_owner or "", account_type=account_type or "visitor")
+            db.session.add(c)
+            db.session.flush()
+
+            # default deny rule if custom: keep explicit deny rule
+            if account_type == "custom":
+                default_rule = AccessRule(card_id=new_card_id, encre_id=None, access_from=None, access_to=None)
+                db.session.add(default_rule)
+                db.session.commit()
             else:
-                try:
-                    error_data = res.get_json()
-                    return f"Error: {error_data.get('error', 'Unknown error')}"
-                except:
-                    return f"Error: Status {res.status_code}"
+                # populate the new card's rules from default account-type rules stored in access_rules (card_id == NULL)
+                defaults = AccessRule.query.filter_by(card_id=None, account_type=account_type).all()
+                if not defaults:
+                    # keep a deny rule if no defaults exist
+                    db.session.add(AccessRule(card_id=new_card_id, encre_id=None, access_from=None, access_to=None))
+                    db.session.commit()
+                else:
+                    # copy the defaults to specific card rows
+                    for dr in defaults:
+                        newr = AccessRule(card_id=new_card_id, account_type=None, encre_id=dr.encre_id, 
+                                          access_from=dr.access_from, access_to=dr.access_to)
+                        db.session.add(newr)
+                    db.session.commit()
+
+            return "Card added successfully (rules set based on account type if not custom)"
         except Exception as e:
-            return f"Exception: {str(e)}"
+            db.session.rollback()
+            return f"Error: {str(e)}"
 
     if triggered == "delete-card-btn":
         if not selected_rows:
@@ -960,17 +1009,18 @@ def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_ow
         card_id = row["card_id"]
 
         try:
-            res = server.test_client().delete("/api/admin/cards", json={"card_id": card_id}, content_type='application/json')
-            if res.status_code == 200:
-                return "Card deleted"
-            else:
-                try:
-                    error_data = res.get_json()
-                    return f"Error: {error_data.get('error', 'Unknown error')}"
-                except:
-                    return f"Error: Status {res.status_code}"
+            c = Card.query.filter_by(card_id=card_id).first()
+            if not c:
+                return "Card not found"
+            
+            # Delete all access rules for this card first
+            AccessRule.query.filter_by(card_id=card_id).delete()
+            db.session.delete(c)
+            db.session.commit()
+            return "Card deleted"
         except Exception as e:
-            return f"Exception: {str(e)}"
+            db.session.rollback()
+            return f"Error: {str(e)}"
 
     if triggered == "toggle-card-btn":
         if not selected_rows:
@@ -978,13 +1028,34 @@ def handle_cards(add_click, delete_click, toggle_click, new_card_id, new_card_ow
         row = table_data[selected_rows[0]]
         card_id = row["card_id"]
         try:
-            res = server.test_client().post("/api/admin/cards/toggle", json={"card_id": card_id})
-            if res.status_code == 200:
-                payload = res.get_json()
-                return f"Card {card_id} active={payload.get('active')}"
-            else:
-                return f"Error toggling card: {res.get_data(as_text=True)}"
+            c = Card.query.filter_by(card_id=card_id).first()
+            if not c:
+                return "Card not found"
+            
+            # TODO 1: When toggling card active state:
+            # - If deactivating (active -> inactive): delete all rules
+            # - If reactivating (inactive -> active): restore rules from account_type defaults
+            if c.active:  # Currently active, about to deactivate
+                AccessRule.query.filter_by(card_id=card_id).delete()
+            else:  # Currently inactive, about to activate
+                # Restore rules from account_type defaults if not custom
+                if c.account_type and c.account_type != "custom":
+                    defaults = AccessRule.query.filter_by(card_id=None, account_type=c.account_type).all()
+                    for dr in defaults:
+                        newr = AccessRule(
+                            card_id=card_id,
+                            account_type=None,
+                            encre_id=dr.encre_id,
+                            access_from=dr.access_from,
+                            access_to=dr.access_to
+                        )
+                        db.session.add(newr)
+            
+            c.active = not c.active
+            db.session.commit()
+            return f"Card {card_id} active={c.active}"
         except Exception as e:
+            db.session.rollback()
             return f"Exception: {str(e)}"
 
     return ""
@@ -1065,11 +1136,25 @@ def handle_rules(add_click, delete_click, card_id, encre_id, rfrom, rto, selecte
             return "Select a rule first"
         row = table_data[selected_rows[0]]
         rule_id = row["id"]
-        res = server.test_client().delete("/api/admin/access_rule", json={"rule_id": rule_id})
-        if res.status_code == 200:
+        try:
+            r = AccessRule.query.filter_by(id=rule_id).first()
+            if not r:
+                return "Rule not found"
+            
+            # TODO 2: If the deleted rule belongs to a card with a non-custom account_type,
+            # change that card's account_type to 'custom'
+            card_id = r.card_id
+            if card_id:
+                card = Card.query.filter_by(card_id=card_id).first()
+                if card and card.account_type and card.account_type != "custom":
+                    card.account_type = "custom"
+            
+            db.session.delete(r)
+            db.session.commit()
             return "Rule deleted"
-        else:
-            return f"Error: {res.get_json()}"
+        except Exception as e:
+            db.session.rollback()
+            return f"Error: {str(e)}"
     return ""
 
 @app.callback(
