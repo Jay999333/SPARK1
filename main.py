@@ -108,13 +108,6 @@ class AccessRule(db.Model):
     access_from = db.Column(db.Time, nullable=True)
     access_to = db.Column(db.Time, nullable=True)
 
-class AccessLog(db.Model):
-    __tablename__ = "access_logs"
-    id = db.Column(db.Integer, primary_key=True)
-    card_id = db.Column(db.String(128))
-    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    result = db.Column(db.String(64))
-    reason = db.Column(db.Text)
 
 class ConnectionLog(db.Model):
     __tablename__ = "connection_logs"
@@ -361,22 +354,12 @@ def pi_check_access():
                     reason = "allowed_no_time_limit"
                     break
 
-    log = AccessLog(card_id=card_id, timestamp=now, result="granted" if granted else "denied", reason=reason)
-    db.session.add(log)
-    db.session.commit()
-
     return jsonify({"granted": granted, "reason": reason})
 
 @server.route("/api/pi/send_log", methods=["POST"])
 @require_pi_jwt
 def pi_send_log():
-    payload = request.json or {}
-    card_id = payload.get("card_id")
-    result = payload.get("result", "unknown")
-    reason = payload.get("reason", "")
-    log = AccessLog(card_id=card_id, timestamp=datetime.datetime.utcnow(), result=result, reason=reason)
-    db.session.add(log)
-    db.session.commit()
+    
     return jsonify({"ok": True})
 
 # -----------------------
@@ -601,18 +584,6 @@ def admin_access_rule():
         db.session.commit()
         return jsonify({"ok": True})
 
-@server.route("/api/admin/logs", methods=["GET"])
-@require_admin
-def admin_logs():
-    card_id = request.args.get("card_id")
-    limit = min(int(request.args.get("limit", "200")), 2000)
-    query = AccessLog.query
-    if card_id:
-        query = query.filter_by(card_id=card_id)
-    logs = query.order_by(AccessLog.timestamp.desc()).limit(limit).all()
-    return jsonify([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, 
-                     "reason": l.reason} for l in logs])
-
 @server.route("/api/admin/logs_connection", methods=["GET"])
 @require_admin
 def admin_logs_connection():
@@ -699,7 +670,6 @@ app.layout = html.Div([
         # account_types tab removed per request; management of default rules is available in "Access Rules"
         dcc.Tab(label="Encres", value="encres"),
         dcc.Tab(label="Access Rules", value="rules"),
-        dcc.Tab(label="Logs", value="logs"),
         dcc.Tab(label="Connection Logs", value="logs_connection"),
         dcc.Tab(label="Pi Devices (Admin)", value="pi")
     ], value="cards"),
@@ -890,27 +860,17 @@ def render_tab(tab):
                                     [{"label": d.encre_name, "value": d.encre_id} for d in encres],
                             value=""
                         ),
-                        dcc.Input(id="atr-from", placeholder="HH:MM", type="text"),
-                        dcc.Input(id="atr-to", placeholder="HH:MM", type="text"),
+                        dcc.Input(id="atr-from", placeholder="HH:MM:SS", type="text"),
+                        dcc.Input(id="atr-to", placeholder="HH:MM:SS", type="text"),
                         html.Button("Add Default Rule", id="atr-add-rule-btn", style={"marginTop": "8px"}),
                         html.Button("Delete Selected Default Rule", id="atr-delete-rule-btn", style={"marginLeft": "8px"}),
                         html.Br(),
-                        html.Button("Save Account Type Rules", id="save-atr-btn", style={"marginTop": "8px"}),
+                        html.Button("Save Account Type Rules", id="s" \
+                        "ave-atr-btn", style={"marginTop": "8px"}),
                         html.Div(id="atr-msg")
                     ], style={"marginTop": "8px"})
                 ], style={"width": "60%", "display": "inline-block", "verticalAlign": "top"})
             ])
-        ])
-
-    if tab == "logs":
-        logs = AccessLog.query.order_by(AccessLog.timestamp.desc()).limit(200).all()
-        df = pd.DataFrame([{"card_id": l.card_id, "timestamp": l.timestamp.isoformat(), "result": l.result, 
-                            "reason": l.reason} for l in logs])
-        return html.Div([
-            html.H3("Access Logs"),
-            dash_table.DataTable(id="logs-table", columns=[{"name": c, "id": c} for c in df.columns], 
-                                 data=df.to_dict("records"), page_size=20),
-            html.Button("Refresh", id="refresh-logs")
         ])
 
     if tab == "logs_connection":
