@@ -42,15 +42,6 @@ CREATE TABLE access_rules (
     FOREIGN KEY (encre_id) REFERENCES encre_devices(encre_id) ON DELETE SET NULL
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
--- Access logs table
-CREATE TABLE access_logs (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    card_id VARCHAR(128),
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    result VARCHAR(64),
-    reason TEXT
-) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 -- Connection logs table
 CREATE TABLE connection_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
